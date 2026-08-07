@@ -1,390 +1,218 @@
-#include <RadioLib.h>
 #include <Arduino.h>
-#include <SPI.h>
-#include <radio.h>
-#include <pin_defs.h>
+#include <LittleFS.h>
 #include <TinyGPSPlus.h>
+
 #include <GPS.h>
-#include <base91.h>
+#include <camutils.h>
 #include <geofence.h>
+#include <helium_jpeg.h>
+#include <pin_defs.h>
 #include <quality.h>
-#include <LinearErasureCoder.h>
-#include "camutils.h"
+#include <radio.h>
 
-
-
-// send a telemetry packet every x packets (alternating lora and 2m)
-const unsigned telempacketinterval = 20;
-
-// send a packet every 10 seconds (10000ms)
-const unsigned long TX_INTERVAL = 10000;
-
-// base image store interval, 4 hours (14400000ms), subject to location
-const unsigned long IMG_interval  = 14400000;
-
-// sync remaining packets to preferences (flash) every 10 mins
-const unsigned updateprefs = 600000;
-
-// how long without a position change before we inject a fake seed (ms) (gps failure fallback for images)
-const unsigned long GPS_SEED_REFRESH_MS = 32000UL; // 32s
-
-
+// The network and local regulations still determine the final permissible
+// uplink rate. This is intentionally conservative for 210-byte EU868 DR5.
+constexpr unsigned long TX_INTERVAL = 60000UL;
+constexpr unsigned long IMG_INTERVAL = 14400000UL;
+constexpr unsigned long PREFS_INTERVAL = 600000UL;
+constexpr unsigned TELEMETRY_PACKET_INTERVAL = 20;
 
 uint32_t counter = 0;
-
 float lat = 0.0f, lng = 0.0f, age_s = 3600.0f, hdop = 26.0f;
 float alt = 0.0f, speed_kmh = 0.0f, course_deg = 0.0f;
 uint16_t year = 0;
 uint8_t month = 0, day = 0, hour = 0, minute = 0, second = 9, centisecond = 0, sats = 0;
 
-
-// default aprs packet, variables change when we have more data like gps
-char callsign[] = "M7CWV";
-char destination[] = "APRS";
-char latitudechars[] = "0000.00N";
-char longitudechars[] = "00000.00E";
-
-
-// debug error flags for telem
-bool littlfserr = 0;
-bool prefserr = 0;
-bool gpserr = 1;
-bool encodererr = 0;
-bool camcaptureerr = 0;
-bool caminiterr = 0;
-
-uint8_t errorflags;
+bool littleFsError = false;
+bool prefsError = false;
+bool gpsError = true;
+bool encoderError = false;
+bool cameraCaptureError = false;
+bool cameraInitError = false;
 
 unsigned long lastTxTime = 0;
-unsigned long lastIMGTime = 0;
-unsigned long lastprefsupdatetime = 0;
+unsigned long lastImageTime = 0;
+unsigned long lastPrefsUpdateTime = 0;
 unsigned long lastTransitionCaptureTime = 0;
-
 unsigned quality = 0;
-unsigned lastquality = 0;
+unsigned lastQuality = 0;
+char timestampChars[30];
 
-char telemmsg[72];
+helium_jpeg::HeliumJPEG imageEncoder;
+int activeImage = -1;
+bool imageEncoderReady = false;
 
-uint8_t packetData[54];
-LinearErasureCoder coder(53); // 53 byte packets
-
-char timestampchars[30];
-
-float lastKnownLat = 0.0f;
-float lastKnownLng = 0.0f;
-unsigned long lastPositionChangeTime = 0;
-
-
-// Call after formatting timestampchars and determining quality.
-// Updates lastIMGTime and camcaptureerr; returns true on successful capture.
-bool captureAndSchedule(int quality, float lat, float lng, float alt, const char* timestampchars) {
-    if (savePhoto(quality, lat, lng, alt, timestampchars) == ESP_OK) {
-        camcaptureerr = 0;
-        if (receptionlocation(lat, lng)) {
-            // High-quality loc: wait 1/4 interval; low-quality loc: wait 1/2 interval
-            lastIMGTime = millis() - (quality == 1 ? (IMG_interval * 3) / 4
-                                                   :  IMG_interval / 2);
-        } else {
-            // High-quality loc: wait 1/2 interval; low-quality loc: wait full interval
-            lastIMGTime = millis() - (quality == 1 ?  IMG_interval / 2
-                                                   :  0);
-        }
-        return true;
-    } else {
-        lastIMGTime = millis() - (IMG_interval * 31) / 32; // retry in ~7.5 min
-        camcaptureerr = 1;
-        return false;
-    }
+helium_jpeg::HeliumTelemetry makeHeliumTelemetry() {
+  helium_jpeg::HeliumTelemetry telemetry = {};
+  telemetry.latitude = (int32_t)(lat * 1000000.0f);
+  telemetry.longitude = (int32_t)(lng * 1000000.0f);
+  telemetry.altitude = (uint16_t)constrain(alt, 0.0f, 65535.0f);
+  telemetry.speed = (uint16_t)constrain(speed_kmh * (100000.0f / 3600.0f), 0.0f, 65535.0f);
+  telemetry.heading = (uint16_t)constrain(course_deg * 100.0f, 0.0f, 35999.0f);
+  telemetry.hdop = (uint8_t)constrain(hdop * 10.0f, 0.0f, 255.0f);
+  telemetry.satellites = sats;
+  telemetry.fix_type = gpsError ? 0 : 3;
+  telemetry.uptime = millis() / 1000UL;
+  telemetry.free_heap_kb = ESP.getFreeHeap() / 1024U;
+  telemetry.status_flags =
+      (gpsError ? helium_jpeg::STATUS_FLAG_GPS_INVALID : 0) |
+      ((cameraInitError || cameraCaptureError) ? helium_jpeg::STATUS_FLAG_CAMERA_ERROR : 0) |
+      (littleFsError ? helium_jpeg::STATUS_FLAG_FS_ERROR : 0) |
+      (encoderError ? helium_jpeg::STATUS_FLAG_ENCODE_FAILED : 0);
+  return telemetry;
 }
 
+bool prepareImageEncoder(int imageNumber) {
+  if (imageEncoderReady && activeImage == imageNumber) return true;
 
+  char filename[12];
+  snprintf(filename, sizeof(filename), "/%d.jpg", imageNumber);
+  File imageFile = LittleFS.open(filename, FILE_READ);
+  if (!imageFile) {
+    Serial.printf("Cannot open image %s\n", filename);
+    return false;
+  }
+
+  // Slot plus incrementing version makes the ID stable throughout an image.
+  const uint16_t imageId = ((uint16_t)imageVersion[imageNumber] << 4) | imageNumber;
+  const int packetCount = imageEncoder.begin(imageFile, imageId);
+  imageFile.close();
+  if (packetCount <= 0) {
+    Serial.printf("HeliumJPEG setup failed for %s: %s\n", filename, imageEncoder.getError());
+    return false;
+  }
+
+  imageEncoder.setTelemetry(makeHeliumTelemetry());
+  activeImage = imageNumber;
+  imageEncoderReady = true;
+  savedImages[imageNumber] = packetCount;
+  return true;
+}
+
+bool transmitNextImagePacket() {
+  const int imageNumber = imageEncoderReady ? activeImage : IMGnToTX(savedImages);
+  if (imageNumber < 0 || !prepareImageEncoder(imageNumber)) return false;
+
+  helium_jpeg::HeliumPacket packet;
+  if (!imageEncoder.getNextPacket(packet)) {
+    imageEncoderReady = false;
+    activeImage = -1;
+    return false;
+  }
+  if (!transmitHelium(packet.data, sizeof(packet.data))) return false;
+
+  if (savedImages[imageNumber] > 0) --savedImages[imageNumber];
+  if (savedImages[imageNumber] == 0) {
+    char filename[12];
+    snprintf(filename, sizeof(filename), "/%d.jpg", imageNumber);
+    LittleFS.remove(filename);
+    imageEncoderReady = false;
+    activeImage = -1;
+  }
+  return true;
+}
+
+bool captureAndSchedule(unsigned newQuality) {
+  snprintf(timestampChars, sizeof(timestampChars), "%u/%u/%u/%u/%u",
+           month, day, hour, minute, second);
+  if (savePhoto(newQuality, lat, lng, alt, timestampChars) != ESP_OK) {
+    lastImageTime = millis() - (IMG_INTERVAL * 31) / 32;
+    cameraCaptureError = true;
+    return false;
+  }
+
+  cameraCaptureError = false;
+  lastImageTime = millis() - (newQuality == 1 ? IMG_INTERVAL / 2 : 0);
+  return true;
+}
 
 void setup() {
-  
   Serial.begin(115200);
-
-  delay(3000);
-
-  Serial.print("3");
   delay(1000);
-  Serial.print("2");
-  delay(1000);
-  Serial.print("1");
-  delay(1000); 
-
-  bool cameraReady = false;
-  int initRetries = 0;
 
   resetCamera();
-
-  // 1. Retry loop for initialization
-  while (!cameraReady && initRetries < 20) {  
-      if (StartCamera() == ESP_OK) { 
-        // 2. Robust warm-up sequence
-        int targetWarmupFrames = 5; 
-        int successfulFrames = 0;
-        int maxAttempts = 15; // Timeout threshold
-        int attemptCount = 0;
-
-        while (successfulFrames < targetWarmupFrames && attemptCount < maxAttempts) {
-            camera_fb_t *warmup = esp_camera_fb_get();
-            
-            if (warmup) {
-                esp_camera_fb_return(warmup);
-                successfulFrames++;
-            } else {
-                Serial.println("Warm-up frame capture failed.");
-            }
-            
-            attemptCount++;
-            delay(200); 
-        }
-
-        cameraReady = true; 
-        Serial.println("Camera initialized and ready.");
-
-      } else {
-          Serial.println("Camera init failed, retrying in 1s...");
-          esp_camera_deinit();
-          resetCamera();
-          initRetries++;
+  bool cameraReady = false;
+  for (int retries = 0; retries < 20 && !cameraReady; ++retries) {
+    if (StartCamera() == ESP_OK) {
+      cameraReady = true;
+      for (int frame = 0; frame < 5; ++frame) {
+        camera_fb_t* warmup = esp_camera_fb_get();
+        if (warmup) esp_camera_fb_return(warmup);
+        delay(100);
       }
+    } else {
+      esp_camera_deinit();
+      resetCamera();
+      delay(1000);
+    }
   }
-
-  // Optional: Catch a total failure after 20 attempts
-  if (!cameraReady) {
-      Serial.println("Fatal error: Camera failed to initialize after 20 attempts.");
-      caminiterr = 1;
-
-      // ESP.restart();  not including because if would disable tracker if camera broke
-  }
-
-  
-  uint8_t *frame;
-  size_t   frame_len;
+  cameraInitError = !cameraReady;
 
   prefs.begin("img_data", false);
-  size_t savedimagesize = prefs.getBytes("remain", savedImages, sizeof(savedImages));
-  
-  if (savedimagesize == 0) {
+  if (prefs.getBytes("remain", savedImages, sizeof(savedImages)) == 0) {
     memset(savedImages, 0, sizeof(savedImages));
     prefs.putBytes("remain", savedImages, sizeof(savedImages));
-    prefserr = 1;
+    prefsError = true;
   }
-
-  size_t versionSize = prefs.getBytes("version", imageVersion, sizeof(imageVersion));
-
-  if (versionSize == 0) {
+  if (prefs.getBytes("version", imageVersion, sizeof(imageVersion)) == 0) {
     memset(imageVersion, 0, sizeof(imageVersion));
     prefs.putBytes("version", imageVersion, sizeof(imageVersion));
-    prefserr = 1;
+    prefsError = true;
   }
-  
 
-  SPI.begin(sxSCK_pin, sxMISO_pin, sxMOSI_pin, -1); // NSS is fed in when the radio stuf initialiased
-
-  GEOFENCE_position(lat, lng);
-
-  Serial2.begin(9600, SERIAL_8N1, gpsRXPin, -1);  // 9600, 3
-
-  if(!LittleFS.begin(true)){
-    Serial.println("LittleFS mount failed!");
-    littlfserr = 1;
+  Serial2.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, -1);
+  if (!LittleFS.begin(true)) {
+    littleFsError = true;
+    Serial.println("LittleFS mount failed");
   }
-  Serial.println("LittleFS mounted OK");
 
-  Serial.printf("LittleFS total: %u bytes\n", LittleFS.totalBytes());
-  Serial.printf("LittleFS used:  %u bytes\n", LittleFS.usedBytes());
-  Serial.printf("LittleFS free:  %u bytes\n", LittleFS.totalBytes() - LittleFS.usedBytes());
-
-  lastPositionChangeTime = millis();
+  GEOFENCE_position(lat, lng);  // Retained as the global transmit inhibit.
+  initLoRaWAN();
 }
 
-
 void loop() {
-
-	while (Serial2.available() > 0) {
-		if (gps.encode(Serial2.read())) {
-			UpdateGPSInfo(lat, lng, age_s,
-              year, month, day,
-              hour, minute, second, centisecond,
-              alt, speed_kmh, course_deg,
-              sats, hdop);
-
-      if (hdop < 20){
-        gpserr = 0;
-      }
-
+  while (Serial2.available() > 0) {
+    if (gps.encode(Serial2.read())) {
+      UpdateGPSInfo(lat, lng, age_s, year, month, day, hour, minute, second,
+                    centisecond, alt, speed_kmh, course_deg, sats, hdop);
+      gpsError = hdop >= 20;
       quality = locationQuality(lat, lng);
+      if (quality == 0) lastQuality = 0;
+    }
+  }
 
-      if (quality == 0){
-        lastquality = 0;
-      }
-
-      // track real position changes to detect gps fails
-      if (lat != lastKnownLat || lng != lastKnownLng) {
-        lastKnownLat = lat;
-        lastKnownLng = lng;
-        lastPositionChangeTime = millis();
-      }
-		}
-	} 
-  
-
-  if ((millis() - lastprefsupdatetime) >= updateprefs){
+  if (millis() - lastPrefsUpdateTime >= PREFS_INTERVAL) {
     prefs.putBytes("remain", savedImages, sizeof(savedImages));
-    lastprefsupdatetime = millis();
+    lastPrefsUpdateTime = millis();
   }
 
-
-    // --- 1. Periodic interval capture ---
-  if ((millis() - lastIMGTime) >= IMG_interval) {
-    snprintf(timestampchars, sizeof(timestampchars), "%d/%d/%d/%d/%d", month, day, hour, minute, second);
-    quality = locationQuality(lat, lng);
-    captureAndSchedule(quality, lat, lng, alt, timestampchars);
+  if (millis() - lastImageTime >= IMG_INTERVAL) {
+    captureAndSchedule(locationQuality(lat, lng));
   }
-
-  // --- 2. Transition into high-quality area ---
-  if ((lastquality == 0) && (quality == 1) && (millis() > 120000) && (hdop < 10) && ((millis() - lastTransitionCaptureTime) > 600000)) {
-    snprintf(timestampchars, sizeof(timestampchars), "%d/%d/%d/%d/%d", month, day, hour, minute, second);
-    if (captureAndSchedule(1, lat, lng, alt, timestampchars)) {
-      Serial.printf("savePhoto OK");
+  if (lastQuality == 0 && quality == 1 && millis() > 120000UL && hdop < 10 &&
+      millis() - lastTransitionCaptureTime > 600000UL) {
+    if (captureAndSchedule(1)) {
       lastTransitionCaptureTime = millis();
-      lastquality = 1; // prevent re-triggering
-      for (int i = 0; i < 16; i++)
-        Serial.printf("savedImages[%d] = %d\n", i, savedImages[i]);
+      lastQuality = 1;
     }
   }
-
-  // --- 3. No stored images, take one now ---
-  if ((millis() > 60000) && (IMGnToTX(savedImages) == -1)) {
-    snprintf(timestampchars, sizeof(timestampchars), "%d/%d/%d/%d/%d", month, day, hour, minute, second);
-    quality = locationQuality(lat, lng);
-    captureAndSchedule(quality, lat, lng, alt, timestampchars);
-    for (int i = 0; i < 16; i++)
-      Serial.printf("savedImages[%d] = %d\n", i, savedImages[i]);
+  if (millis() > 60000UL && IMGnToTX(savedImages) == -1) {
+    captureAndSchedule(locationQuality(lat, lng));
   }
 
+  if (millis() - lastTxTime < TX_INTERVAL) return;
+  lastTxTime = millis();
+  GEOFENCE_position(lat, lng);
 
-
-  //transmit stuff below here
-
-  if (millis() - lastTxTime >= TX_INTERVAL) {
-
-    lastTxTime = millis();
-
-    aprsFormatLat(lat, latitudechars, sizeof(latitudechars));
-    aprsFormatLng(lng, longitudechars, sizeof(longitudechars));
-
-    // If position has been frozen for GPS_SEED_REFRESH_MS, inject a random
-    // Antarctic seed.  Randomised so each tx window produces
-    // a fresh set of linearly-independent RLNC packets.
-    // The fake coords are also transmitted so ground can always reconstruct.
-    if (((millis() - lastPositionChangeTime) >= GPS_SEED_REFRESH_MS) || (lat == 0 && lng == 0)) {
-
-      // Box: 85°S–86°S, 0°E–90°E - unreachable by any northern hemisphere HAB
-      float fakeLat = -85.0f - (float)(esp_random() % 10000) / 10000.0f; // -85.0000 to -85.9999
-      float fakeLng =           (float)(esp_random() % 900000) / 10000.0f; //   0.0000 to 89.9999
-
-      aprsFormatLat(fakeLat, latitudechars, sizeof(latitudechars));
-      aprsFormatLng(fakeLng, longitudechars, sizeof(longitudechars));
-
-      gpserr = 1; // keep error flag set — ground can see GPS is down
-      Serial.printf("GPS seed fallback: using fake coords %s %s\n",
-                    latitudechars, longitudechars);
-    }
-
-    GEOFENCE_position(lat, lng);
-
-
-    if ((counter % telempacketinterval) == 0){
-      errorflags = packBools(gpserr, caminiterr, camcaptureerr, littlfserr, prefserr, encodererr, 0, 0);
-      
-      uint8_t imgLo = packBools(
-        savedImages[0] != 0, savedImages[1] != 0,
-        savedImages[2] != 0, savedImages[3] != 0,
-        savedImages[4] != 0, savedImages[5] != 0,
-        savedImages[6] != 0, savedImages[7] != 0
-        );
-      uint8_t imgHi = packBools(
-        savedImages[8]  != 0, savedImages[9]  != 0,
-        savedImages[10] != 0, savedImages[11] != 0,
-        savedImages[12] != 0, savedImages[13] != 0,
-        savedImages[14] != 0, savedImages[15] != 0
-        );
-
-      snprintf(telemmsg, sizeof(telemmsg), "T%d/%d/%d/%d/%dP%.0f/%.0f/%d/%.1fS%dE%02XI%02X%02X", 
-        month, day, hour, minute, second, alt, speed_kmh, sats, hdop, counter, errorflags, imgLo, imgHi); // about 47 chars used
-
-      lastTxTime = millis(); // Reset timer
-
-      if ((counter % (telempacketinterval * 2)) == 0) { // do half and half 2m/lora for telem packets
-        transmit_2m(callsign, destination, latitudechars, longitudechars, telemmsg);
-        Serial.print(telemmsg);
-        Serial.println(" :2m payload");
-        counter++;
-      } 
-      else {
-        transmit_lora(callsign, destination, latitudechars, longitudechars, telemmsg);
-        Serial.print(telemmsg);
-        Serial.println(" :lora payload");
-        counter++;
-      }
-    }
-
-    else {
-      //transmit image packet
-
-      int filenum = IMGnToTX(savedImages);
-      if (filenum == -1){
-        Serial.println("no packets to send");
-        lastTxTime = millis();
-        counter++;
-        return;
-      }
-      // 4 least significant bits is image number, 4 most is random to create prng seed variability when not moving
-      uint8_t identifier = 0; 
-
-      uint32_t raw_random = esp_random();
-      // Mask with 0xC0 (binary 11000000) to keep only the higher 2 bits
-      identifier = raw_random & 0xC0;
-      identifier += (imageVersion[filenum] & 0x03) * 16; // take 2 least significant bits and put them in positions 00110000
-      identifier += filenum; // 0-15, so 00001111
-
-      char accessfilebuf[12];
-      snprintf(accessfilebuf, sizeof(accessfilebuf), "/%d.jpg", filenum);
-
-      if (coder.encodePacket(LittleFS, accessfilebuf, latitudechars, longitudechars, identifier, packetData)) {
-
-        // bytes 0-52 are already filled (53 bytes)
-        packetData[53] = identifier;
-
-        char outputBuffer[72]; // max is 67 chars   \o_     _o/      \o_     _o/  with a little extra
-        encodeBase91(packetData, sizeof(packetData), outputBuffer);
-
-        lastTxTime = millis(); // Reset timer
-        transmit_2m(callsign, destination, latitudechars, longitudechars, outputBuffer);
-
-        Serial.printf("%s, %s, %s", latitudechars, longitudechars, outputBuffer);
-        Serial.println();
-
-        if (receptionlocation(lat, lng) && (savedImages[filenum] > 0)){
-        savedImages[filenum]--; // if pretty sure packet recieved, decrement remaining for that image
-        }
-
-        if (savedImages[filenum] == 0){
-          LittleFS.remove(accessfilebuf);
-          }
-
-        counter++;
-      }
-      else{
-        Serial.print("encode failed");
-        Serial.println(filenum);
-        encodererr = 1;
-        lastTxTime = millis();
-        counter++; // so if critically broken it can still do telem
-      }
-    }
+  if (counter % TELEMETRY_PACKET_INTERVAL == 0) {
+    // Short human-readable status uplink; image metadata carries the full
+    // fixed-width HeliumTelemetry structure.
+    char status[72];
+    snprintf(status, sizeof(status), "T%u/%u/%u A%.0f S%u H%.1f N%u",
+             hour, minute, second, alt, sats, hdop, counter);
+    if (!transmitHelium((const uint8_t*)status, strlen(status))) encoderError = true;
+  } else if (IMGnToTX(savedImages) >= 0) {
+    if (!transmitNextImagePacket()) encoderError = true;
   }
+  ++counter;
 }

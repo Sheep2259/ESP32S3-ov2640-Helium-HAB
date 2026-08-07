@@ -1,6 +1,12 @@
-void transmit_2m(char callsign[], char destination[], char latitude[], char longitude[], char message[]);
-void transmit_lora(char callsign[], char destination[], char latitude[], char longitude[], char message[]);
-//void setup_lora_rx();
-//void RXfinishedimages(uint16_t* savedImages);
-//bool processRXpacket(String message, uint16_t* savedImages);
-bool receptionlocation(float latitude, float longitude);
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+// Starts the SX1262 and joins the configured Helium LoRaWAN network.
+// Returns false when credentials are not configured or a join fails.
+bool initLoRaWAN();
+
+// Sends one binary LoRaWAN uplink on the configured application port.
+// The geofence remains the final transmit inhibit.
+bool transmitHelium(const uint8_t* payload, size_t length);

@@ -3,6 +3,8 @@
 #include <Preferences.h>
 #include <math.h>
 #include <camutils.h>
+#include <helium_jpeg.h>
+#include <pin_defs.h>
 
 Preferences prefs;
 
@@ -14,26 +16,6 @@ uint8_t imageVersion[16];
 
 
 
-
-#define CAMERA_MODEL_AI_THINKER
-
-
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
 
 // -------------------------------------------------------
 // Camera clock speed in MHz.
@@ -52,22 +34,22 @@ esp_err_t StartCamera() {
 
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer   = LEDC_TIMER_0;
-    config.pin_d0       = Y2_GPIO_NUM;
-    config.pin_d1       = Y3_GPIO_NUM;
-    config.pin_d2       = Y4_GPIO_NUM;
-    config.pin_d3       = Y5_GPIO_NUM;
-    config.pin_d4       = Y6_GPIO_NUM;
-    config.pin_d5       = Y7_GPIO_NUM;
-    config.pin_d6       = Y8_GPIO_NUM;
-    config.pin_d7       = Y9_GPIO_NUM;
-    config.pin_xclk     = XCLK_GPIO_NUM;
-    config.pin_pclk     = PCLK_GPIO_NUM;
-    config.pin_vsync    = VSYNC_GPIO_NUM;
-    config.pin_href     = HREF_GPIO_NUM;
-    config.pin_sccb_sda = SIOD_GPIO_NUM;
-    config.pin_sccb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn     = PWDN_GPIO_NUM;
-    config.pin_reset    = RESET_GPIO_NUM;
+    config.pin_d0       = CAM_D0;
+    config.pin_d1       = CAM_D1;
+    config.pin_d2       = CAM_D2;
+    config.pin_d3       = CAM_D3;
+    config.pin_d4       = CAM_D4;
+    config.pin_d5       = CAM_D5;
+    config.pin_d6       = CAM_D6;
+    config.pin_d7       = CAM_D7;
+    config.pin_xclk     = CAM_XCLK;
+    config.pin_pclk     = CAM_PCLK;
+    config.pin_vsync    = CAM_VSYNC;
+    config.pin_href     = CAM_HREF;
+    config.pin_sccb_sda = CAM_SDA;
+    config.pin_sccb_scl = CAM_SCL;
+    config.pin_pwdn     = CAM_PWDN;
+    config.pin_reset    = CAM_RESET;
 
     config.xclk_freq_hz = XCLK_FREQ_MHZ * 1000000;
     config.pixel_format = PIXFORMAT_JPEG;   // must be JPEG for fb->buf to be usable directly
@@ -128,14 +110,16 @@ esp_err_t StartCamera() {
 
 
 void resetCamera() {
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  pinMode(CAM_LDO_EN, OUTPUT);
+  digitalWrite(CAM_LDO_EN, HIGH);
+  pinMode(CAM_PWDN, OUTPUT);
   
   // Pull PWDN high to power down the camera
-  digitalWrite(PWDN_GPIO_NUM, HIGH);
+  digitalWrite(CAM_PWDN, HIGH);
   delay(500);
   
   // Pull PWDN low to power up the camera and reset state
-  digitalWrite(PWDN_GPIO_NUM, LOW);
+  digitalWrite(CAM_PWDN, LOW);
   delay(500);
 }
 
@@ -304,8 +288,21 @@ esp_err_t savePhoto(uint8_t quality, double lat, double lng, float alt, const ch
 
             Serial.printf("savePhoto: slot %d validated OK\n", i);
 
-            savedImages[i] = (uint16_t)ceil((finalSize * 1.2) / 53.0);
             imageVersion[i]++;
+            // HeliumJPEG packet count includes the repeated metadata packets;
+            // persist the exact count so an image resumes correctly after reset.
+            File encodedImage = LittleFS.open(filename, FILE_READ);
+            helium_jpeg::HeliumJPEG packetizer;
+            const uint16_t imageId = ((uint16_t)imageVersion[i] << 4) | i;
+            const int packetCount = encodedImage ? packetizer.begin(encodedImage, imageId) : -1;
+            if (encodedImage) encodedImage.close();
+            if (packetCount <= 0) {
+                Serial.printf("savePhoto: HeliumJPEG setup failed for %s: %s\n",
+                              filename, packetizer.getError());
+                LittleFS.remove(filename);
+                return ESP_FAIL;
+            }
+            savedImages[i] = (uint16_t)packetCount;
             prefs.putBytes("version", imageVersion, sizeof(imageVersion));
             prefs.putBytes("remain", savedImages, sizeof(savedImages));
             saved = true;
