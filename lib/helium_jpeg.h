@@ -160,9 +160,11 @@ public:
 
     /// Get the next packet in sequence.
     /// Returns false when all packets have been yielded.
-    /// Metadata packets are yielded first (repeated metaRepeat times),
-    /// followed by data packets in scan order.
+    /// Metadata packets are distributed across the image packet stream.
     bool getNextPacket(HeliumPacket& pkt);
+
+    /// Skip already-sent packets when restoring progress after a power loss.
+    bool skipPackets(uint16_t count);
 
     /// Get total packet count (metadata × repeat + data packets).
     int getPacketCount() const;

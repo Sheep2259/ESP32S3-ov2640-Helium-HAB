@@ -1,498 +1,157 @@
 #include <LittleFS.h>
-#include "esp_camera.h"
 #include <Preferences.h>
-#include <math.h>
 #include <camutils.h>
-#include <helium_jpeg.h>
 #include <pin_defs.h>
 
 Preferences prefs;
+uint16_t savedImages[IMAGE_SLOT_COUNT] = {};
+uint16_t imageIds[IMAGE_SLOT_COUNT] = {};
+uint16_t nextImageId = 0;
 
-// savedImages array contains the remaining packets required for complete transmission
-// default is 0 for nonexistent images, when remaining packets are decremented to 0 it is safe to overwrite
-uint16_t savedImages[16];
-
-uint8_t imageVersion[16];
-
-
-
-
-// -------------------------------------------------------
-// Camera clock speed in MHz.
-// 8 MHz is conservative and avoids artefacts on clones.
-// Increase to 20 for best frame rate if your module handles it.
-// -------------------------------------------------------
-#define XCLK_FREQ_MHZ 20
-
-// -------------------------------------------------------
-// StartCamera()
-// Initialises the camera hardware.
-// Call once from setup(). Halts with Serial errors on failure.
-// -------------------------------------------------------
-esp_err_t StartCamera() {
-    camera_config_t config;
-
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer   = LEDC_TIMER_0;
-    config.pin_d0       = CAM_D0;
-    config.pin_d1       = CAM_D1;
-    config.pin_d2       = CAM_D2;
-    config.pin_d3       = CAM_D3;
-    config.pin_d4       = CAM_D4;
-    config.pin_d5       = CAM_D5;
-    config.pin_d6       = CAM_D6;
-    config.pin_d7       = CAM_D7;
-    config.pin_xclk     = CAM_XCLK;
-    config.pin_pclk     = CAM_PCLK;
-    config.pin_vsync    = CAM_VSYNC;
-    config.pin_href     = CAM_HREF;
-    config.pin_sccb_sda = CAM_SDA;
-    config.pin_sccb_scl = CAM_SCL;
-    config.pin_pwdn     = CAM_PWDN;
-    config.pin_reset    = CAM_RESET;
-
-    config.xclk_freq_hz = XCLK_FREQ_MHZ * 1000000;
-    config.pixel_format = PIXFORMAT_JPEG;   // must be JPEG for fb->buf to be usable directly
-    config.frame_size   = FRAMESIZE_SVGA;   // change as needed (see below)
-    config.jpeg_quality = 8;               // 0–63; lower = higher quality / larger file
-    config.fb_location  = CAMERA_FB_IN_PSRAM;
-    config.fb_count     = 2;               // double-buffer; use 1 if no PSRAM
-    config.grab_mode    = CAMERA_GRAB_LATEST;
-
-    /*
-     * frame_size options (from API.md / esp-camera headers):
-     *   FRAMESIZE_THUMB  (96x96)
-     *   FRAMESIZE_QQVGA  (160x120)
-     *   FRAMESIZE_HQVGA  (240x176)
-     *   FRAMESIZE_QVGA   (320x240)
-     *   FRAMESIZE_CIF    (400x296)
-     *   FRAMESIZE_HVGA   (480x320)
-     *   FRAMESIZE_VGA    (640x480)
-     *   FRAMESIZE_SVGA   (800x600)   <-- default here
-     *   FRAMESIZE_XGA    (1024x768)
-     *   FRAMESIZE_HD     (1280x720)
-     *   FRAMESIZE_SXGA   (1280x1024)
-     *   FRAMESIZE_UXGA   (1600x1200)
-     *   FRAMESIZE_FHD    (1920x1080) -- 3MP+ sensors only (OV3660)
-     *   FRAMESIZE_QXGA   (2048x1536) -- 3MP+ sensors only
-     */
-
-
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        Serial.printf("CRITICAL: Camera init failed with error 0x%x\n", err);
-        Serial.println("A full power cycle (off/on) may be needed to recover.");
-        return err;
-    }
-
-    // Optional: tweak sensor defaults after init
-    sensor_t *s = esp_camera_sensor_get();
-
-
-    // Uncomment and adjust any of these to change default image properties:
-    // s->set_framesize(s,  FRAMESIZE_VGA);
-    // s->set_quality(s,    10);       // 0–63
-    // s->set_brightness(s,  0);       // -2 to 2
-    // s->set_contrast(s,    0);       // -2 to 2
-    // s->set_saturation(s,  0);       // -2 to 2
-    // s->set_hmirror(s,     0);       // 0 or 1
-    // s->set_vflip(s,       0);       // 0 or 1
-    // s->set_whitebal(s,    1);       // AWB: 0=off 1=on
-    // s->set_awb_gain(s,    1);       // 0=off 1=on
-    // s->set_exposure_ctrl(s, 1);     // AEC: 0=off 1=on
-    // s->set_gain_ctrl(s,   1);       // AGC: 0=off 1=on
-
-
-    Serial.println("Camera init succeeded");
-    return err;
+void imageFilename(uint16_t imageId, char* output, size_t outputSize) {
+  snprintf(output, outputSize, "/%u.jpg", imageId);
 }
 
+void telemetryFilename(uint16_t imageId, char* output, size_t outputSize) {
+  snprintf(output, outputSize, "/%u.tlm", imageId);
+}
 
+esp_err_t StartCamera() {
+  camera_config_t config = {};
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = CAM_D0; config.pin_d1 = CAM_D1; config.pin_d2 = CAM_D2; config.pin_d3 = CAM_D3;
+  config.pin_d4 = CAM_D4; config.pin_d5 = CAM_D5; config.pin_d6 = CAM_D6; config.pin_d7 = CAM_D7;
+  config.pin_xclk = CAM_XCLK; config.pin_pclk = CAM_PCLK; config.pin_vsync = CAM_VSYNC; config.pin_href = CAM_HREF;
+  config.pin_sccb_sda = CAM_SDA; config.pin_sccb_scl = CAM_SCL;
+  config.pin_pwdn = CAM_PWDN; config.pin_reset = CAM_RESET;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_SVGA;
+  config.jpeg_quality = 8;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.fb_count = 2;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+  return esp_camera_init(&config);
+}
 
 void resetCamera() {
   pinMode(CAM_LDO_EN, OUTPUT);
   digitalWrite(CAM_LDO_EN, HIGH);
   pinMode(CAM_PWDN, OUTPUT);
-  
-  // Pull PWDN high to power down the camera
   digitalWrite(CAM_PWDN, HIGH);
   delay(500);
-  
-  // Pull PWDN low to power up the camera and reset state
   digitalWrite(CAM_PWDN, LOW);
   delay(500);
 }
 
-
-
-
-// -------------------------------------------------------
-// captureJpeg()
-// Grabs one JPEG frame from the camera.
-//
-// Returns a camera_fb_t* on success; nullptr on failure.
-// YOU MUST call esp_camera_fb_return(fb) when done with
-// the buffer, or memory will leak.
-// -------------------------------------------------------
 camera_fb_t* captureJpeg() {
-    camera_fb_t *fb = nullptr;
-
-    for (int cycle = 0; cycle < 5; cycle++) {
-        // Attempt to grab a frame, 2 retries per cycle
-        for (int attempt = 0; attempt < 2; attempt++) {
-            fb = esp_camera_fb_get();
-            if (fb) break;
-            Serial.printf("captureJpeg: cycle %d, attempt %d failed, retrying...\n", cycle + 1, attempt + 1);
-            delay(200);
-        }
-
-        if (fb) break; // Got a frame, no need to reinit
-
-        // No frame after retries — reinitialise the camera
-        Serial.printf("captureJpeg: cycle %d failed, reinitialising camera...\n", cycle + 1);
-        esp_camera_deinit();
-        resetCamera();
-
-        int warmupFrames = 0;
-        if (StartCamera() == ESP_OK) {
-            // Warm-up sequence after reinit
-            for (int w = 0; w < 15 && warmupFrames < 3; w++) {
-                camera_fb_t *warmup = esp_camera_fb_get();
-                if (warmup) {
-                    esp_camera_fb_return(warmup);
-                    warmupFrames++;
-                }
-                delay(200);
-            }
-            Serial.println("captureJpeg: camera reinitialised.");
-        } else {
-            Serial.println("captureJpeg: camera reinit failed.");
-        }
-    }
-
-    if (!fb) {
-        Serial.printf("captureJpeg failed — heap free: %u, PSRAM free: %u\n",
-                      ESP.getFreeHeap(), ESP.getFreePsram());
-        Serial.println("captureJpeg: failed to acquire frame after all cycles.");
-        return nullptr;
-    }
-
-    if (fb->format != PIXFORMAT_JPEG) {
-        Serial.println("captureJpeg: unexpected non-JPEG frame");
-        esp_camera_fb_return(fb);
-        return nullptr;
-    }
-
-    return fb;
-}
-
-
-esp_err_t savePhoto(uint8_t quality, double lat, double lng, float alt, const char* timeStr) {
-    camera_fb_t *fb = captureJpeg();
-    if (!fb) {
-        Serial.println("savePhoto: frame buffer could not be acquired");
-        return ESP_FAIL;
-    }
-
-    uint8_t *buf = fb->buf;
-    size_t len = fb->len;
-
-    // ------------------------------------------------------------------
-    // Step 2: Validate the JPEG in PSRAM before touching the filesystem.
-    // A bad frame here means we never waste a flash slot on corrupt data.
-    // ------------------------------------------------------------------
-    if (!validateJpegBuffer(buf, len)) {
-        Serial.println("savePhoto: captured frame failed JPEG validation — discarding");
-        esp_camera_fb_return(fb);
-        return ESP_FAIL;
-    }
-
-    uint8_t startIdx = (quality == 1) ? 0 : 8;
-    uint8_t endIdx   = (quality == 1) ? 8 : 16;
-    bool saved = false;
-
-    for (uint8_t i = startIdx; i < endIdx; i++) {
-        if (savedImages[i] == 0) {
-            char filename[12];
-            snprintf(filename, sizeof(filename), "/%d.jpg", i);
-
-            File file = LittleFS.open(filename, FILE_WRITE);
-            if (!file) {
-                Serial.println("savePhoto: failed to open file for writing");
-                esp_camera_fb_return(fb);
-                return ESP_FAIL;
-            }
-
-            // ----------------------------------------------------------
-            // Step 3: Write JPEG from PSRAM to flash in 512-byte chunks.
-            // ----------------------------------------------------------
-            const size_t CHUNK = 512;
-            uint8_t chunkBuf[CHUNK];
-            size_t totalWritten = 0;
-            size_t offset = 0;
-            bool writeError = false;
-
-            while (offset < len) {
-                size_t toWrite = min(CHUNK, len - offset);
-                memcpy(chunkBuf, buf + offset, toWrite);   // PSRAM -> SRAM
-                size_t written = file.write(chunkBuf, toWrite);
-                if (written != toWrite) {
-                    Serial.printf("savePhoto: write failed at offset %u "
-                                  "(wanted %u got %u)\n",
-                                  (unsigned)offset, (unsigned)toWrite, (unsigned)written);
-                    writeError = true;
-                    break;
-                }
-                totalWritten += written;
-                offset += toWrite;
-            }
-
-            if (writeError || totalWritten != len) {
-                Serial.printf("savePhoto: incomplete write (%u/%u bytes) — deleting slot\n",
-                              (unsigned)totalWritten, (unsigned)len);
-                file.close();
-                LittleFS.remove(filename);
-                esp_camera_fb_return(fb);
-                return ESP_FAIL;
-            }
-
-            // ----------------------------------------------------------
-            // Step 4: Append metadata trailer (original format).
-            // ----------------------------------------------------------
-            file.printf("||META:T=%s,LT=%.6f,LN=%.6f,A=%.0f", timeStr, lat, lng, alt);
-            file.flush();
-            size_t finalSize = file.size();
-            file.close();
-
-            Serial.printf("savePhoto: wrote %u bytes (JPEG) + trailer = %u total\n",
-                          (unsigned)len, (unsigned)finalSize);
-
-            if (finalSize == 0) {
-                Serial.println("savePhoto: file size is 0 after write — aborting");
-                LittleFS.remove(filename);
-                esp_camera_fb_return(fb);
-                return ESP_FAIL;
-            }
-
-            // ----------------------------------------------------------
-            // Step 5: Re-read the file from flash and validate it.
-            // This catches filesystem write errors or silent corruption.
-            // ----------------------------------------------------------
-            if (!validateJpegFile(filename)) {
-                Serial.printf("savePhoto: post-write validation FAILED for %s — deleting\n",
-                              filename);
-                LittleFS.remove(filename);
-                esp_camera_fb_return(fb);
-                return ESP_FAIL;
-            }
-
-            Serial.printf("savePhoto: slot %d validated OK\n", i);
-
-            imageVersion[i]++;
-            // HeliumJPEG packet count includes the repeated metadata packets;
-            // persist the exact count so an image resumes correctly after reset.
-            File encodedImage = LittleFS.open(filename, FILE_READ);
-            helium_jpeg::HeliumJPEG packetizer;
-            const uint16_t imageId = ((uint16_t)imageVersion[i] << 4) | i;
-            const int packetCount = encodedImage ? packetizer.begin(encodedImage, imageId) : -1;
-            if (encodedImage) encodedImage.close();
-            if (packetCount <= 0) {
-                Serial.printf("savePhoto: HeliumJPEG setup failed for %s: %s\n",
-                              filename, packetizer.getError());
-                LittleFS.remove(filename);
-                return ESP_FAIL;
-            }
-            savedImages[i] = (uint16_t)packetCount;
-            prefs.putBytes("version", imageVersion, sizeof(imageVersion));
-            prefs.putBytes("remain", savedImages, sizeof(savedImages));
-            saved = true;
-            break;
-        }
-    }
-
-    esp_camera_fb_return(fb);
-    if (!saved) Serial.println("savePhoto: no available slots.");
-    return saved ? ESP_OK : ESP_FAIL;
-}
-
-
-
-// Returns an index (0-15) from savedImages based on weighted rank logic.
-// Returns -1 if all images are 0.
-int IMGnToTX(uint16_t savedImages[]) {
-  float g = 0.01;
-
-  // 1. Determine the initial range: 0 for (0-7), 1 for (8-15) (TRNG i believe)
-  int rangeSelect = random(0, 2);
-  
-  // Struct to hold index and value for sorting
-  struct ImageCandidate {
-    uint8_t index;
-    uint16_t value;
-  };
-
-  ImageCandidate validItems[8];
-  int count = 0;
-
-  // Helper lambda to fill candidates from a specific range
-  // (Using a simple block here for Arduino compatibility)
-  auto fillCandidates = [&](int range) {
-    count = 0;
-    int start = range * 8;
-    int end = start + 8;
-    for (int i = start; i < end; i++) {
-      if (savedImages[i] > 0) {
-        validItems[count].index = i;
-        validItems[count].value = savedImages[i];
-        count++;
-      }
-    }
-  };
-
-  // 2. Try to fill from selected range
-  fillCandidates(rangeSelect);
-
-  // 3. If no valid packets in selected range, swap to the other range
-  if (count == 0) {
-    rangeSelect = 1 - rangeSelect; // Flip 0 to 1 or 1 to 0
-    fillCandidates(rangeSelect);
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    camera_fb_t* frame = esp_camera_fb_get();
+    if (frame && frame->format == PIXFORMAT_JPEG) return frame;
+    if (frame) esp_camera_fb_return(frame);
+    delay(200);
   }
-
-  // 4. If still 0, all files are done. Return -1 (or handle as needed)
-  if (count == 0) return -1;
-
-  // 5. Sort validItems by value (Smallest to Largest)
-  // Simple Bubble Sort is efficient enough for max 8 items
-  for (int i = 0; i < count - 1; i++) {
-    for (int j = 0; j < count - i - 1; j++) {
-      if (validItems[j].value > validItems[j + 1].value) {
-        ImageCandidate temp = validItems[j];
-        validItems[j] = validItems[j + 1];
-        validItems[j + 1] = temp;
-      }
-    }
-  }
-
-  // 6. Select index using weighted formula
-  // We must calculate the Base probability dynamically based on 'count'
-  // so that the sum of probabilities equals 1.0.
-  // Formula derived from sum: count * Base - g * (count * (count - 1) / 2) = 1.0
-  
-  float base = (1.0 + g * count * (count - 1) / 2.0) / (float)count;
-  
-  float randVal = random(0, 10001) / 10000.0; // High precision random 0.0 - 1.0
-  float cumulativeProbability = 0.0;
-
-  for (int n = 0; n < count; n++) {
-    // Rank 0 (smallest packet count) gets the highest probability
-    float probability = base - (g * n);
-    
-    cumulativeProbability += probability;
-
-    if (randVal <= cumulativeProbability) {
-      return validItems[n].index;
-    }
-  }
-
-  // Fallback (in case of floating point rounding errors)
-  return validItems[count - 1].index;
+  return nullptr;
 }
 
-// how many images stored?
-uint8_t countStoredImages(const uint16_t* savedImages) {
-    uint8_t count = 0;
-    for (int i = 0; i < 16; i++) {
-        if (savedImages[i] != 0) count++;
-    }
-    return count;
-}
-
-// -------------------------------------------------------
-// validateJpegBuffer()
-// Checks that a buffer in RAM is a well-formed JPEG:
-//   • Starts with SOI marker  FF D8
-//   • Contains an EOI marker  FF D9 within the last 32 bytes
-//
-// Call this on the raw camera framebuffer before writing to flash.
-// Returns true if the JPEG looks intact.
-// -------------------------------------------------------
 bool validateJpegBuffer(const uint8_t* buf, size_t len) {
-    if (len < 4) {
-        Serial.printf("validateJpegBuffer: too small (%u bytes)\n", (unsigned)len);
-        return false;
-    }
-    // JPEG SOI
-    if (buf[0] != 0xFF || buf[1] != 0xD8) {
-        Serial.printf("validateJpegBuffer: bad SOI bytes: %02X %02X\n", buf[0], buf[1]);
-        return false;
-    }
-    // JPEG EOI must appear somewhere in the last 32 bytes
-    size_t scanFrom = (len >= 32) ? len - 32 : 0;
-    for (size_t i = scanFrom; i < len - 1; i++) {
-        if (buf[i] == 0xFF && buf[i + 1] == 0xD9) return true;
-    }
-    Serial.println("validateJpegBuffer: no EOI marker found");
-    return false;
+  if (len < 4 || buf[0] != 0xFF || buf[1] != 0xD8) return false;
+  for (size_t i = (len > 32 ? len - 32 : 0); i + 1 < len; ++i) {
+    if (buf[i] == 0xFF && buf[i + 1] == 0xD9) return true;
+  }
+  return false;
 }
 
-// -------------------------------------------------------
-// validateJpegFile()
-// Re-reads a saved file from LittleFS and checks:
-//   • Starts with SOI  FF D8
-//   • Contains an EOI  FF D9 somewhere in the final 300 bytes
-//     (before the appended ||META: block)
-//
-// The tail scan covers the last 300 bytes of the file, which
-// is well beyond the ~80-byte metadata trailer.
-// Returns true if the file appears to be a valid JPEG.
-// -------------------------------------------------------
 bool validateJpegFile(const char* filename) {
-    File f = LittleFS.open(filename, "r");
-    if (!f) {
-        Serial.printf("validateJpegFile: cannot open %s\n", filename);
-        return false;
-    }
-    size_t fileSize = f.size();
-    if (fileSize < 4) {
-        Serial.printf("validateJpegFile: file too small (%u bytes)\n", (unsigned)fileSize);
-        f.close();
-        return false;
-    }
+  File file = LittleFS.open(filename, FILE_READ);
+  if (!file || file.size() < 4) return false;
+  uint8_t start[2];
+  if (file.read(start, 2) != 2 || start[0] != 0xFF || start[1] != 0xD8) return false;
+  const size_t from = file.size() > 256 ? file.size() - 256 : 2;
+  file.seek(from);
+  uint8_t previous = 0;
+  while (file.available()) {
+    uint8_t value = file.read();
+    if (previous == 0xFF && value == 0xD9) return true;
+    previous = value;
+  }
+  return false;
+}
 
-    // --- Check SOI at start ---
-    uint8_t header[3] = {0};
-    if (f.read(header, 3) != 3 || header[0] != 0xFF || header[1] != 0xD8) {
-        Serial.printf("validateJpegFile: bad SOI in %s (%02X %02X)\n",
-                      filename, header[0], header[1]);
-        f.close();
-        return false;
-    }
+bool readImageTelemetry(uint16_t imageId, helium_jpeg::HeliumTelemetry& telemetry) {
+  char filename[16];
+  telemetryFilename(imageId, filename, sizeof(filename));
+  File file = LittleFS.open(filename, FILE_READ);
+  if (!file || file.size() != sizeof(telemetry)) return false;
+  return file.read((uint8_t*)&telemetry, sizeof(telemetry)) == sizeof(telemetry);
+}
 
-    // --- Scan tail for EOI ---
-    // Read up to 300 bytes from near the end.
-    // This sits past any real JPEG data and before/within the metadata trailer.
-    const size_t TAIL_WINDOW = 200;
-    size_t scanFrom = (fileSize > TAIL_WINDOW) ? fileSize - TAIL_WINDOW : 3;
-    if (!f.seek(scanFrom)) {
-        Serial.printf("validateJpegFile: seek failed in %s\n", filename);
-        f.close();
-        return false;
-    }
+int oldestStoredImage() {
+  int selected = -1;
+  for (size_t i = 0; i < IMAGE_SLOT_COUNT; ++i) {
+    if (savedImages[i] == 0) continue;
+    if (selected < 0 || (int16_t)(imageIds[i] - imageIds[selected]) < 0) selected = i;
+  }
+  return selected;
+}
 
-    uint8_t prev = 0;
-    bool foundEOI = false;
-    while (f.available()) {
-        uint8_t b = (uint8_t)f.read();
-        if (prev == 0xFF && b == 0xD9) {
-            foundEOI = true;
-            break;
-        }
-        prev = b;
-    }
+esp_err_t savePhoto(helium_jpeg::HeliumTelemetry telemetry) {
+  int slot = -1;
+  for (size_t i = 0; i < IMAGE_SLOT_COUNT; ++i) if (savedImages[i] == 0) { slot = (int)i; break; }
+  if (slot < 0) return ESP_FAIL;
 
-    f.close();
-    if (!foundEOI) {
-        Serial.printf("validateJpegFile: no EOI marker in tail of %s\n", filename);
-    }
-    return foundEOI;
+  const uint32_t captureStart = millis();
+  camera_fb_t* frame = captureJpeg();
+  if (!frame || !validateJpegBuffer(frame->buf, frame->len)) {
+    if (frame) esp_camera_fb_return(frame);
+    return ESP_FAIL;
+  }
+
+  const size_t jpegSize = frame->len;
+  const size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
+  if (jpegSize > MAX_JPEG_BYTES || jpegSize + sizeof(telemetry) + IMAGE_STORE_RESERVE_BYTES > freeBytes) {
+    Serial.printf("Image not stored: %u bytes, %u bytes free\n", (unsigned)jpegSize, (unsigned)freeBytes);
+    esp_camera_fb_return(frame);
+    return ESP_FAIL;
+  }
+  const uint16_t imageId = nextImageId++;
+  char jpegName[16], telemetryName[16];
+  imageFilename(imageId, jpegName, sizeof(jpegName));
+  telemetryFilename(imageId, telemetryName, sizeof(telemetryName));
+  File jpeg = LittleFS.open(jpegName, FILE_WRITE);
+  if (!jpeg) { esp_camera_fb_return(frame); return ESP_FAIL; }
+  const size_t written = jpeg.write(frame->buf, jpegSize);
+  jpeg.close();
+  esp_camera_fb_return(frame);
+  if (written != jpegSize || !validateJpegFile(jpegName)) {
+    LittleFS.remove(jpegName);
+    return ESP_FAIL;
+  }
+
+  telemetry.jpeg_file_size = jpegSize;
+  telemetry.capture_ms = (uint16_t)min((uint32_t)65535, (uint32_t)(millis() - captureStart));
+  File telemetryFile = LittleFS.open(telemetryName, FILE_WRITE);
+  if (!telemetryFile || telemetryFile.write((const uint8_t*)&telemetry, sizeof(telemetry)) != sizeof(telemetry)) {
+    if (telemetryFile) telemetryFile.close();
+    LittleFS.remove(jpegName);
+    LittleFS.remove(telemetryName);
+    return ESP_FAIL;
+  }
+  telemetryFile.close();
+
+  File packetFile = LittleFS.open(jpegName, FILE_READ);
+  helium_jpeg::HeliumJPEG packetizer;
+  const int count = packetFile ? packetizer.begin(packetFile, imageId) : -1;
+  if (packetFile) packetFile.close();
+  if (count <= 0) {
+    LittleFS.remove(jpegName); LittleFS.remove(telemetryName);
+    return ESP_FAIL;
+  }
+  imageIds[slot] = imageId;
+  savedImages[slot] = (uint16_t)count;
+  prefs.putBytes("remain", savedImages, sizeof(savedImages));
+  prefs.putBytes("image_ids", imageIds, sizeof(imageIds));
+  prefs.putUShort("next_image_id", nextImageId);
+  return ESP_OK;
 }

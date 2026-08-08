@@ -58,6 +58,7 @@ struct HeliumJPEG::Impl {
 
     // Iteration state
     int current_packet_index;  // -meta_repeat..-1 = meta packets, 0..N-1 = data packets
+    uint8_t metadata_sent;
     int total_packet_count;
 
     // Scan data buffer (for re-encoding)
@@ -71,7 +72,7 @@ struct HeliumJPEG::Impl {
     const char* error;
 
     Impl() : mcu_boundaries(nullptr), packet_plans(nullptr),
-             data_packet_count(0), current_packet_index(0),
+             data_packet_count(0), current_packet_index(0), metadata_sent(0),
              total_packet_count(0), scan_buffer(nullptr),
              scan_buffer_size(0), file_ref(nullptr), error(nullptr),
              has_telemetry(false) {
@@ -182,7 +183,8 @@ int HeliumJPEG::begin(fs::File& jpegFile, uint16_t imageId, uint8_t metaRepeat) 
 
     // Set up iteration
     impl_->total_packet_count = impl_->meta_repeat + impl_->data_packet_count;
-    impl_->current_packet_index = -(int)impl_->meta_repeat;
+    impl_->current_packet_index = 0;
+    impl_->metadata_sent = 0;
 
     return impl_->total_packet_count;
 }
@@ -614,13 +616,16 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
     if (!impl_) return false;
 
     int idx = impl_->current_packet_index;
-    int meta_start = -(int)impl_->meta_repeat;
+    if (idx >= impl_->data_packet_count && impl_->metadata_sent >= impl_->meta_repeat) return false;
 
-    if (idx >= impl_->data_packet_count) return false;
+    // Place metadata at approximately 0%, 33%, and 66% of the data stream.
+    const bool emitMetadata = impl_->metadata_sent < impl_->meta_repeat &&
+        (idx >= impl_->data_packet_count ||
+         ((uint32_t)idx * impl_->meta_repeat) / impl_->data_packet_count >= impl_->metadata_sent);
 
     memset(pkt.data, 0, PACKET_SIZE);
 
-    if (idx < 0) {
+    if (emitMetadata) {
         // ── Metadata packet ──
         uint8_t* h = pkt.data;
 
@@ -686,7 +691,8 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
         }
     }
 
-    impl_->current_packet_index++;
+    if (emitMetadata) impl_->metadata_sent++;
+    else impl_->current_packet_index++;
     return true;
 }
 
@@ -719,8 +725,17 @@ uint16_t HeliumJPEG::getMCUsY() const {
 
 void HeliumJPEG::reset() {
     if (impl_) {
-        impl_->current_packet_index = -(int)impl_->meta_repeat;
+        impl_->current_packet_index = 0;
+        impl_->metadata_sent = 0;
     }
+}
+
+bool HeliumJPEG::skipPackets(uint16_t count) {
+    HeliumPacket ignored;
+    while (count-- > 0) {
+        if (!getNextPacket(ignored)) return false;
+    }
+    return true;
 }
 
 const char* HeliumJPEG::getError() const {

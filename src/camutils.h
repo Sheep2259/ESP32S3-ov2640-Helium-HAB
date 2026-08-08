@@ -4,10 +4,15 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "esp_camera.h"
+#include <helium_jpeg.h>
 
 extern Preferences prefs;
-extern uint16_t savedImages[16];
-extern uint8_t imageVersion[16];
+constexpr size_t IMAGE_SLOT_COUNT = 128;
+constexpr size_t MAX_JPEG_BYTES = 120U * 1024U;
+constexpr size_t IMAGE_STORE_RESERVE_BYTES = 2048U;
+extern uint16_t savedImages[IMAGE_SLOT_COUNT];
+extern uint16_t imageIds[IMAGE_SLOT_COUNT];
+extern uint16_t nextImageId;
 
 // -----------------------------------------------------------------
 // Error-detection helpers
@@ -31,11 +36,13 @@ bool validateJpegFile(const char* filename);
 // -----------------------------------------------------------------
 // Core camera functions
 // -----------------------------------------------------------------
-esp_err_t savePhoto(uint8_t quality, double lat, double lng, float alt, const char* timeStr);
-int IMGnToTX(uint16_t savedImages[]);
+esp_err_t savePhoto(helium_jpeg::HeliumTelemetry telemetry);
+int oldestStoredImage();
+bool readImageTelemetry(uint16_t imageId, helium_jpeg::HeliumTelemetry& telemetry);
+void imageFilename(uint16_t imageId, char* output, size_t outputSize);
+void telemetryFilename(uint16_t imageId, char* output, size_t outputSize);
 esp_err_t StartCamera();
 camera_fb_t* captureJpeg();
 void resetCamera();
-uint8_t countStoredImages(const uint16_t* savedImages);
 
 #endif
