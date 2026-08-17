@@ -20,11 +20,23 @@ esp_err_t StartCamera() {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = CAM_D0; config.pin_d1 = CAM_D1; config.pin_d2 = CAM_D2; config.pin_d3 = CAM_D3;
-  config.pin_d4 = CAM_D4; config.pin_d5 = CAM_D5; config.pin_d6 = CAM_D6; config.pin_d7 = CAM_D7;
-  config.pin_xclk = CAM_XCLK; config.pin_pclk = CAM_PCLK; config.pin_vsync = CAM_VSYNC; config.pin_href = CAM_HREF;
-  config.pin_sccb_sda = CAM_SDA; config.pin_sccb_scl = CAM_SCL;
-  config.pin_pwdn = CAM_PWDN; config.pin_reset = CAM_RESET;
+  config.pin_d0 = CAM_D0; 
+  config.pin_d1 = CAM_D1; 
+  config.pin_d2 = CAM_D2; 
+  config.pin_d3 = CAM_D3;
+  config.pin_d4 = CAM_D4; 
+  config.pin_d5 = CAM_D5; 
+  config.pin_d6 = CAM_D6; 
+  config.pin_d7 = CAM_D7;
+  config.pin_xclk = CAM_XCLK; 
+  config.pin_pclk = CAM_PCLK; 
+  config.pin_vsync = CAM_VSYNC; 
+  config.pin_href = CAM_HREF;
+  config.pin_sccb_sda = CAM_SDA; 
+  config.pin_sccb_scl = CAM_SCL;
+  config.pin_pwdn = CAM_PWDN; 
+  config.pin_reset = CAM_RESET;
+  
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_SVGA;
