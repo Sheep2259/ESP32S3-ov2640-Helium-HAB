@@ -2,30 +2,46 @@
 
 #include <RadioLib.h>
 
-// Helium Console must be configured for the same LoRaWAN region. UK flights
-// normally use EU868; change this to the region used by your Helium device.
-const LoRaWANBand_t* const LORAWAN_REGION = &EU868;
-constexpr uint8_t LORAWAN_SUB_BAND = 0;  // US915/AU915 use the assigned 1-based sub-band.
-constexpr uint8_t LORAWAN_DATA_RATE = 5; // EU868 DR5 supports the 210-byte HeliumJPEG packets.
+// The balloon changes frequency plan only after a fresh GPS position enters
+// one of the configured geofences. Use a different DevEUI for each plan so
+// DevNonce and network-session state remain independent at the LNS.
+constexpr uint8_t LORAWAN_EU_DATA_RATE = 5;
+constexpr uint8_t LORAWAN_US_DATA_RATE = 4;
+constexpr uint8_t LORAWAN_US_SUB_BAND = 2;
 constexpr uint8_t LORAWAN_APP_PORT = 1;
+constexpr unsigned long LORAWAN_JOIN_RETRY_MS = 15UL * 60UL * 1000UL;
 
-// Put real OTAA credentials in include/lorawan_secrets.h (which should not be
-// committed). Copy the four declarations below exactly, with real values.
-// Leaving these placeholders disables joining and keeps the firmware safe to
-// build and flash before provisioning.
+// Set the corresponding *_LORAWAN_1_1 flag true only when that LNS device
+// profile is explicitly LoRaWAN 1.1. Most hosted profiles are LoRaWAN 1.0.x.
 #if __has_include("lorawan_secrets.h")
 #include "lorawan_secrets.h"
 #else
-constexpr uint64_t LORAWAN_JOIN_EUI = 0;
-constexpr uint64_t LORAWAN_DEV_EUI = 0;
-constexpr uint8_t LORAWAN_NWK_KEY[16] = {};
-constexpr uint8_t LORAWAN_APP_KEY[16] = {};
+constexpr bool EU_LORAWAN_1_1 = false;
+constexpr uint64_t EU_LORAWAN_JOIN_EUI = 0;
+constexpr uint64_t EU_LORAWAN_DEV_EUI = 0;
+constexpr uint8_t EU_LORAWAN_NWK_KEY[16] = {};
+constexpr uint8_t EU_LORAWAN_APP_KEY[16] = {};
+
+constexpr bool US_LORAWAN_1_1 = false;
+constexpr uint64_t US_LORAWAN_JOIN_EUI = 0;
+constexpr uint64_t US_LORAWAN_DEV_EUI = 0;
+constexpr uint8_t US_LORAWAN_NWK_KEY[16] = {};
+constexpr uint8_t US_LORAWAN_APP_KEY[16] = {};
 #endif
 
-inline bool lorawanCredentialsConfigured() {
-    if (LORAWAN_DEV_EUI == 0) return false;
-    for (uint8_t i = 0; i < 16; ++i) {
-        if (LORAWAN_NWK_KEY[i] != 0 || LORAWAN_APP_KEY[i] != 0) return true;
-    }
-    return false;
+inline bool keyConfigured(const uint8_t* key) {
+  for (uint8_t i = 0; i < 16; ++i) {
+    if (key[i] != 0) return true;
+  }
+  return false;
+}
+
+inline bool euLorawanCredentialsConfigured() {
+  return EU_LORAWAN_DEV_EUI != 0 && keyConfigured(EU_LORAWAN_APP_KEY) &&
+         (!EU_LORAWAN_1_1 || keyConfigured(EU_LORAWAN_NWK_KEY));
+}
+
+inline bool usLorawanCredentialsConfigured() {
+  return US_LORAWAN_DEV_EUI != 0 && keyConfigured(US_LORAWAN_APP_KEY) &&
+         (!US_LORAWAN_1_1 || keyConfigured(US_LORAWAN_NWK_KEY));
 }

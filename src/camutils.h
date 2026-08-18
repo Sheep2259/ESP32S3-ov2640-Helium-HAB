@@ -36,6 +36,11 @@ bool validateJpegFile(const char* filename);
 // -----------------------------------------------------------------
 // Core camera functions
 // -----------------------------------------------------------------
+bool initialiseImageStore();
+bool imageStoreCanAcceptCapture();
+void persistImageProgress();
+void discardImageSlot(int slot);
+void completeImageSlot(int slot);
 esp_err_t savePhoto(helium_jpeg::HeliumTelemetry telemetry);
 int oldestStoredImage();
 bool readImageTelemetry(uint16_t imageId, helium_jpeg::HeliumTelemetry& telemetry);
@@ -44,5 +49,6 @@ void telemetryFilename(uint16_t imageId, char* output, size_t outputSize);
 esp_err_t StartCamera();
 camera_fb_t* captureJpeg();
 void resetCamera();
+void stopCamera();
 
 #endif

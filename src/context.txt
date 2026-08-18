@@ -1,0 +1,15 @@
+the purpose of this code is to work on an esp32s3 based board, with E22-900M22S, si5351, ov2640 (voltages supplied by ME6211C28M5G-N and 1.2v variant), and to be powered from a series of ~8 cells in series, inputted to a RT6150AGQW.
+
+a general overview of its function is that it will be launched on a long duration picoballoon, and will drift around the northern hemisphere for months, while not in helium network range it should put most of its time into transmitting its location over wspr, and capturing images at some interval.
+while in range of the helium network it should uplink packets of the images data along with metadata about the images. it should stay close to the legal limits to maximise datarate, taking into account different laws in eu and americas. those are the only 2 geofence/legal zones considered, as helium has near zero coverage outside them.
+it will turn on everyday with solar, assisted by a voltage supervisor to avoid bad states, run for as long there is sufficient sunlight, and turn off when the sunlight cannot power it anymore. the turn off part will be unplanned, as in it will turn off unexpectedly.
+
+camera/storage specific function: it will take reasonable quality svga images and store them to a littlefs file, up to some max, whether flat or dynamic. it will also simultaneously store a telemetry file containing a range of data about the board, its position and state, data about the format of the image, ect.
+it will take an image when it turns on for the day, and every 5 (or other, depends on analysis not done yet) hours after that. the number of packets remaining to be transmitted will be stored, and that will be used to determine when that image is done, and then to delete it and move to the next oldest one.
+the storage system must account for the unexpected turnoff, by being able to recover from a range of possible outcomes from turnoff during write.
+
+radios specific funtion: as stated, the helium transmitter needs to stay close to the legal limits in eu and us, and maximise datarate. the downlinks from helium groundstations to the board should be limited/avoided, as in no asking for retransmits. that said, it should be fairly sure packets will be recieved when they are transmitted.
+the si5351 transmits wspr over 17m band, transmit alternating 2m windows, to give the gps time to get a fix inbetween. ideally, telemetry should be incorporated with the traquito system, so i can know alt, more precice location, number of images stored.
+while image data can be transmitted, dont bother as much with wspr, maybe one frame every 2 hours as a backup. importantly, the geofence zones do not indicate image data can be transmitted, should probably use helium connection for that.
+
+

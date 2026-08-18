@@ -1,15 +1,29 @@
 #pragma once
 
-// Copy this file to include/lorawan_secrets.h and replace every value with
-// the OTAA credentials from the Helium Console device page. That copy is
-// ignored by Git so keys do not enter the repository.
-constexpr uint64_t LORAWAN_JOIN_EUI = 0x0000000000000000;
-constexpr uint64_t LORAWAN_DEV_EUI = 0x0000000000000000;
-constexpr uint8_t LORAWAN_NWK_KEY[16] = {
+// Copy this file to include/lorawan_secrets.h. Register two LNS devices with
+// different DevEUIs: one EU868 profile and one US915 sub-band 2 profile. Never
+// commit the populated copy.
+
+constexpr bool EU_LORAWAN_1_1 = false;
+constexpr uint64_t EU_LORAWAN_JOIN_EUI = 0x0000000000000000;
+constexpr uint64_t EU_LORAWAN_DEV_EUI = 0x0000000000000000;
+constexpr uint8_t EU_LORAWAN_NWK_KEY[16] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-constexpr uint8_t LORAWAN_APP_KEY[16] = {
+constexpr uint8_t EU_LORAWAN_APP_KEY[16] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+constexpr bool US_LORAWAN_1_1 = false;
+constexpr uint64_t US_LORAWAN_JOIN_EUI = 0x0000000000000000;
+constexpr uint64_t US_LORAWAN_DEV_EUI = 0x0000000000000000;
+constexpr uint8_t US_LORAWAN_NWK_KEY[16] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+constexpr uint8_t US_LORAWAN_APP_KEY[16] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };

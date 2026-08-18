@@ -24,10 +24,7 @@ void UpdateGPSInfo(
     lat = gps.location.lat();
     lng = gps.location.lng();
 
-    unsigned long ageMs = gps.location.age();
-    if (ageMs < 1000000UL) {  // if less than ~1000s old, consider valid
-      age_s = ageMs / 1000.0;
-    }
+    age_s = gps.location.age() / 1000.0f;
   }
 
   // --- Date / Time (UTC) ---
@@ -68,6 +65,17 @@ void UpdateGPSInfo(
   if (gps.hdop.isValid()) {
     hdop = gps.hdop.hdop();
   }
+}
+
+bool GPSPositionFresh(unsigned long maximumAgeMs) {
+  return gps.location.isValid() && gps.hdop.isValid() &&
+         gps.location.age() <= maximumAgeMs && gps.hdop.age() <= maximumAgeMs &&
+         gps.hdop.hdop() < 20.0;
+}
+
+bool GPSTimeFresh(unsigned long maximumAgeMs) {
+  return gps.time.isValid() && gps.date.isValid() &&
+         gps.time.age() <= maximumAgeMs && gps.date.age() <= maximumAgeMs;
 }
 
 

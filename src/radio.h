@@ -3,9 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 
-// Starts the SX1262 and joins the configured Helium LoRaWAN network.
-// Returns false when credentials are not configured or a join fails.
+#include "geofence.h"
+
+// Starts the SX1262. Joining is deferred until serviceLoRaWAN() receives a
+// region selected from a fresh GPS position.
 bool initLoRaWAN();
+void serviceLoRaWAN(HeliumRegion region);
+bool lorawanCanTransmit();
 
 // Sends one binary LoRaWAN uplink on the configured application port.
 // The geofence remains the final transmit inhibit.

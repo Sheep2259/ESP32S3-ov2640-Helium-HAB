@@ -14,4 +14,7 @@ void UpdateGPSInfo(
 
 extern TinyGPSPlus gps;
 
+bool GPSPositionFresh(unsigned long maximumAgeMs = 30000UL);
+bool GPSTimeFresh(unsigned long maximumAgeMs = 5000UL);
+
 #endif
