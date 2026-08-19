@@ -13,3 +13,81 @@ the si5351 transmits wspr over 17m band, transmit alternating 2m windows, to giv
 while image data can be transmitted, dont bother as much with wspr, maybe one frame every 2 hours as a backup. importantly, the geofence zones do not indicate image data can be transmitted, should probably use helium connection for that.
 
 
+condensed project decisions (2026-08-18):
+
+mission/scheduling:
+- probable UK launch, then Europe and possibly Russia/Middle East; target float altitude 11-12 km and duration 80+ days.
+- image schedule is persistent elapsed time, not "once per boot": after GPS time is obtained, capture only if at least 8 hours have elapsed since the last successfully stored image. brownout/restart must not cause an extra capture. do not adapt the interval to coverage, daylight, or storage use.
+- if no image is queued, capture one as soon as the persistent 8-hour rule permits. partial reconstructed images are useful.
+- when storage is full, stop capturing until transmission frees space. preserve and transmit the oldest images first.
+
+power/hardware:
+- source is eight roughly 200 mA photovoltaic cells in series, previously measured around 0.5-0.6 V per cell, feeding the RT6150AGQW. there is no battery; only reasonably large electrolytics on the PV and 3.3 V rails plus ceramic decoupling.
+- MAX809STRG-TP supervisor has no early-warning GPIO. there is no voltage-sense input and no spare GPIO. unused solar power need not be conserved, but peak current/power must remain within what the supply can support.
+- CAM_LDO_EN controls both the 2.8 V and 1.2 V camera regulators.
+- the authoritative Board2/Schematic2 EasyEDA Pro project, PDF schematic, BOM, and TEL netlist were supplied on 2026-08-18. the populated module is ESP32-S3-WROOM-1U-N16R2. firmware pin assignments were checked against these artifacts and match the camera, GPS UART, Si5351/shared I2C, and E22 control/SPI wiring.
+- Board2/Schematic2 is the flight revision and a manufactured board is physically available for bench validation. EasyEDA DRC and layout checks have already been completed by the owner.
+
+camera/storage:
+- likely flight setting is OV2640 SVGA, JPEG quality 8. choose the JPEG size limit so normal captures are usually accepted; do not retry oversized images at lower quality.
+- 128 fixed queue slots are intended to avoid dynamic-allocation fragmentation and are close to the useful storage maximum.
+- separate JPEG and telemetry files are acceptable and currently preferred for reliability. add format version, CRC, boot/reset identifiers, or similar fields only where they materially improve recovery/diagnosis.
+- strongly avoid formatting LittleFS. format only when the filesystem is genuinely nonfunctional and unrecoverable.
+- persisting packet progress every roughly 8-16 packets is acceptable; balance repeated packets after reset against NVS wear over an 80+ day mission.
+- delete an image when its final scheduled packet has been transmitted. backend acknowledgement and deliberate image-data retransmission/FEC are not required; missing and duplicate packets are acceptable if cost stays reasonable and most of an image remains recoverable.
+
+helium/lorawan:
+- LNS is TBD, likely Datacake or Data Matters. EU/US device registrations have not yet been created and LoRaWAN 1.0.x versus 1.1 is unknown.
+- legal frequency-plan geofences and actual Helium reachability are separate states. group locations by the applicable Helium frequency zones. only attempt image transfer after evidence such as a successful join or received heartbeat/downlink; downlinks are acceptable if they make this reliable.
+- when Helium is reachable, finish the current WSPR/telemetry sequence before switching to image transfer. when it becomes unreachable, return to the normal WSPR cadence.
+- transmit image packets as fast as the applicable law, regional limits, payload size, hardware, and network allow. use the high data rates needed for the large packets and allow faster cadence in regions where permitted; exact rates/power/duty-cycle policy remains to be calculated and validated.
+- persist a LoRaWAN session across shutdown only if required for reliable operation. tolerate packet loss and duplication rather than adding expensive confirmation/retry schemes. image deletion is based on all parts having been transmitted, not confirmed by the backend.
+- a separate receiver/reassembler is being developed. a minimum end-to-end acceptance test is stored JPEG -> device packets -> Helium/LNS -> reconstructed viewable JPEG.
+- ordinary LoRaWAN position/health heartbeats are not required while images are queued.
+
+wspr/custom telemetry:
+- callsign M7CWV is confirmed. legal/licensing responsibility is handled separately; firmware should use supplied authorised settings and fail safe when they are absent.
+- use the standard 17 m WSPR frequency. intended radiated/conducted power is approximately +10 dBm, with a low-pass filter. antenna/RF characteristics have been measured/documented, but Si5351 frequency correction is not yet calibrated.
+- normal cycle is one 2-minute GPS/no-transmit window, one 2-minute standard WSPR frame, then one 2-minute custom telemetry frame, repeated. do not transmit without valid GPS time and position.
+- custom WSPR-adjacent telemetry is preferred over adopting Traquito unchanged. priority fields are extended location, stored-image count, then ESP die temperature. add a separate lower-priority diagnostic telemetry packet containing persistent reset reason/brownout, failed-join, storage-repair, watchdog, and similar mission counters.
+- inside a legal Helium region but without a reachable ground station, retain the normal WSPR/telemetry cadence. once a ground station is found, complete the current WSPR/telemetry sequence and prioritize image transfer.
+
+gps/telemetry:
+- GPS hardware is ATGM336H-5NR32; its firmware revision remains unknown. it is factory configured at 9600 baud and has already been validated at the expected 11-12 km altitude without configuration input. persisting the last valid position is not essential.
+- no external environmental sensors or voltage monitor are fitted and no GPIO remains. no independent LoRaWAN telemetry heartbeat is currently required. image/remaining-packet counts are mainly useful in the custom RF telemetry rather than LoRaWAN image metadata.
+- persistent mission diagnostics are wanted: at minimum reset/brownout reason, failed joins, storage repairs, and watchdog events.
+
+reliability/deployment:
+- add a watchdog with a flight-appropriate recovery policy.
+- OTA updating is not required and is considered insufficiently reliable for this mission.
+- flight and preflight/test modes should remain separate so test features do not complicate the flight code.
+- production programming/recovery is performed manually with jumpers and serial and has been confirmed working on the manufactured board. flight/preflight diagnostics should use UART, not USB CDC; the current USB-CDC build setting must be changed accordingly.
+- automatic partition erasure, fully transactional dual-generation queue records, and the exact power-cut fault-injection matrix remain design decisions. prefer the simplest implementation that demonstrably survives interrupted JPEG write, telemetry write, queue/progress commit, packet transmit, and file deletion.
+
+hardware artifact review notes (reviewed 2026-08-18, corrected 2026-08-19; verified decisions and remaining code implications):
+- the Si5351 reference fitted in the BOM is a 26 MHz EPSON X1G0042110003 (TG-5006CG-12H) TCXO, not a 25 MHz crystal. firmware frequency calculations must explicitly use the measured 26 MHz reference and its calibrated correction. Schematic2 supplies it with 3.3 V although the official recommended maximum is 3.15 V; the manufactured hardware has been tested successfully at 3.3 V and this accepted out-of-spec condition is noted rather than treated as a blocking change. expected minimum internal operating temperature is -10 C, within the TCXO's -30 C rating.
+- Schematic2 exposes Si5351 CLK0 at a two-pad SI5351A/GND connection. the WSPR filtering and any matching/amplification are intentionally external to Board2.
+- the apparent unrouted E22 ANT net is intentional: the fitted module provides its antenna through an on-module I-PEX connector.
+- LED1 is a plain KT-0603R connected between ESP32 GPIO2 (module physical pin 38) and ground with no external series resistor. in the EasyEDA netlist, `U17.38` means U17 physical pin 38; it does not mean GPIO38. U0TXD is the separate module physical pin 37. the manufactured board has been tested using GPIO2's internal pull-up as the current-limited source. firmware must keep the LED pin high-impedance and use only the internal pull-up for illumination; do not configure GPIO2 as a push-pull high output unless external current limiting is added.
+- H1 exposes 3.3 V, U0RXD, U0TXD, and ground. manual jumper/serial programming has been confirmed working, so lack of dedicated GPIO0/EN and USB connections is accepted for this build.
+- CAM_LDO_EN drives both LDO enable pins but has no external default pull-down in Schematic2. verify the ME6211 CE default behavior or add a pull-down so both camera rails remain deterministically off while the ESP is reset/unpowered.
+
+known implementation changes (recorded for later; not requested in the 2026-08-18 review pass):
+- initialise the Si5351 calculations with the actual 26 MHz reference instead of the library's 25 MHz default, then apply the measured correction and final authorised lowest-tone frequency.
+- replace the per-boot/millis image timer with a GPS-UTC-based last-successful-capture timestamp persisted across resets; do not take a startup image unless the persistent 8-hour condition is satisfied.
+- change the build/diagnostic configuration from USB CDC to the already validated UART0 path. LED1 is on GPIO2 and is electrically separate from U0TXD, so UART diagnostics do not need an LED-specific workaround.
+- implement the required 2-minute GPS/silence -> 2-minute standard WSPR -> 2-minute custom telemetry cycle. add extended position/image-count/die-temperature telemetry and the separate persistent diagnostic packet.
+- separate legal-region selection from live Helium reachability. do not reduce WSPR merely because a geofence matches; require a successful join plus suitably fresh network evidence, expire stale reachability, and finish the current WSPR/telemetry sequence before changing modes.
+- replace the fixed one-minute LoRaWAN image cadence and fixed regional data-rate assumptions with reviewed per-frequency-plan payload, data-rate, power, dwell-time/duty-cycle, and cadence policy.
+- make image packet advancement internally consistent on local transmit failure: either deliberately count the failed attempt as a discarded packet or retain/recreate that packet. the current encoder advances while the persisted remaining count does not, which can skip data and eventually stall an image.
+- use the intended approximately +10 dBm value in standard WSPR metadata once the complete external RF chain has been measured; Si5351 drive setting and RF-chain output are separate values.
+- do not format LittleFS immediately after a single mount failure. attempt bounded recovery/diagnosis first and format only when the filesystem is established to be unrecoverable.
+- add the flight watchdog, persistent reset/brownout/join/storage/watchdog counters, and the separate preflight/fault-injection tests. decide LoRaWAN session persistence after the final LNS and LoRaWAN version are known.
+
+still tbd / inputs needed before flight freeze:
+- exact LNS/provider, LoRaWAN version, credentials, and whether session persistence is required.
+- final regional polygons/frequency plans and reviewed legal RF limits; exact LoRaWAN cadence, output power, antenna-loss/gain assumptions, and coverage-evidence timeout.
+- exact custom telemetry encoding, diagnostic packet cadence, and transition behavior if reachability changes mid-image.
+- final WSPR lowest-tone frequency, measured 26 MHz Si5351 reference/correction, and verified +10 dBm RF level after the external filtering/matching/amplification chain.
+- ATGM336H firmware revision, supply peak-current margin, and final typical/worst-case JPEG size measurements.
+- policy and implementation for unrecoverable filesystem detection, atomic queue commits, watchdog thresholds, and power-cut testing.

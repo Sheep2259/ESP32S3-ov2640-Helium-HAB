@@ -307,6 +307,11 @@ void maybeTransmitImagePacket() {
 }  // namespace
 
 void setup() {
+  // Board2 LED1 is wired from GPIO2 (ESP module physical pin 38) directly to
+  // GND without an external series resistor. The manufactured board was
+  // bench-tested with GPIO2 kept as an input and its internal pull-up used as
+  // the current-limited source. Do not drive GPIO2 push-pull high unless an
+  // external current limiter is added. U0TXD is separate, on physical pin 37.
   Serial.begin(115200);
   delay(1000);
 
