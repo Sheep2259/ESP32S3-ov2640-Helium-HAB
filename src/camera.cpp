@@ -1,10 +1,137 @@
 #include "camera.h"
 
+#include <Wire.h>
 #include <pin_defs.h>
 
 namespace camera {
 namespace {
 bool driverStarted = false;
+
+constexpr uint8_t kOv2640Address = 0x30;
+constexpr uint8_t kSi5351Address = 0x60;
+constexpr uint8_t kOv2640BankSelect = 0xFF;
+constexpr uint8_t kOv2640SensorBank = 0x01;
+constexpr uint8_t kOv2640ProductIdRegister = 0x0A;
+constexpr uint8_t kOv2640VersionRegister = 0x0B;
+constexpr uint32_t kSccbFrequencyHz = 100000;
+
+void startDiagnosticXclk(uint32_t frequencyHz) {
+  ledcSetup(LEDC_CHANNEL_0, frequencyHz, 1);
+  ledcAttachPin(CAM_XCLK, LEDC_CHANNEL_0);
+  ledcWrite(LEDC_CHANNEL_0, 1);
+}
+
+void stopDiagnosticXclk() {
+  ledcWrite(LEDC_CHANNEL_0, 0);
+  ledcDetachPin(CAM_XCLK);
+  pinMode(CAM_XCLK, INPUT);
+}
+
+bool sccbAddressAcknowledges(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission(true) == 0;
+}
+
+bool sccbWriteRegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission(true) == 0;
+}
+
+bool sccbReadRegister(uint8_t address, uint8_t reg, uint8_t& value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(address, static_cast<uint8_t>(1),
+                       static_cast<uint8_t>(true)) != 1) {
+    return false;
+  }
+  value = Wire.read();
+  return true;
+}
+
+void printLineState(const char* stage) {
+  pinMode(CAM_SDA, INPUT);
+  pinMode(CAM_SCL, INPUT);
+  Serial.printf("[camera-diag] %s: SDA=%s SCL=%s%s\n", stage,
+                digitalRead(CAM_SDA) ? "HIGH" : "LOW",
+                digitalRead(CAM_SCL) ? "HIGH" : "LOW",
+                (!digitalRead(CAM_SDA) || !digitalRead(CAM_SCL))
+                    ? " (a low SCCB line may be stuck or missing its pull-up)"
+                    : "");
+}
+
+void runSccbAttempt(uint32_t xclkFrequencyHz) {
+  powerOff();
+  delay(250);
+
+  pinMode(CAM_LDO_EN, OUTPUT);
+  digitalWrite(CAM_LDO_EN, HIGH);
+  pinMode(CAM_PWDN, OUTPUT);
+  digitalWrite(CAM_PWDN, HIGH);
+  pinMode(CAM_RESET, OUTPUT);
+  digitalWrite(CAM_RESET, LOW);
+  delay(500);
+
+  startDiagnosticXclk(xclkFrequencyHz);
+  delay(20);
+  digitalWrite(CAM_RESET, HIGH);
+  delay(20);
+  digitalWrite(CAM_PWDN, LOW);
+  delay(500);
+
+  Serial.printf("[camera-diag] Testing XCLK=%lu Hz.\n",
+                static_cast<unsigned long>(xclkFrequencyHz));
+  printLineState("before SCCB controller starts");
+
+  if (!Wire.begin(CAM_SDA, CAM_SCL, kSccbFrequencyHz)) {
+    Serial.println("[camera-diag] ERROR: ESP32 SCCB controller did not start.");
+    stopDiagnosticXclk();
+    powerOff();
+    return;
+  }
+  Wire.setTimeOut(50);
+
+  const bool cameraAck = sccbAddressAcknowledges(kOv2640Address);
+  const bool clockGeneratorAck = sccbAddressAcknowledges(kSi5351Address);
+  Serial.printf("[camera-diag] address 0x30 OV2640=%s; address 0x60 Si5351=%s.\n",
+                cameraAck ? "ACK" : "NO_ACK",
+                clockGeneratorAck ? "ACK" : "NO_ACK");
+
+  if (cameraAck) {
+    uint8_t productId = 0;
+    uint8_t version = 0;
+    const bool selectedSensorBank =
+        sccbWriteRegister(kOv2640Address, kOv2640BankSelect,
+                          kOv2640SensorBank);
+    const bool productIdRead =
+        selectedSensorBank &&
+        sccbReadRegister(kOv2640Address, kOv2640ProductIdRegister, productId);
+    const bool versionRead =
+        selectedSensorBank &&
+        sccbReadRegister(kOv2640Address, kOv2640VersionRegister, version);
+    if (productIdRead && versionRead) {
+      Serial.printf(
+          "[camera-diag] sensor identity PID=0x%02X VER=0x%02X: %s.\n",
+          productId, version,
+          productId == 0x26 ? "OV2640 identity is valid"
+                            : "unexpected sensor identity");
+    } else {
+      Serial.println(
+          "[camera-diag] OV2640 ACKed, but its identity registers could not be read.");
+    }
+  } else {
+    Serial.println(
+        "[camera-diag] No camera ACK: check rails, ribbon, PWDN/RESET and XCLK path.");
+  }
+
+  Wire.end();
+  stopDiagnosticXclk();
+  powerOff();
+  pinMode(CAM_RESET, INPUT);
+  delay(250);
+}
 }
 
 void powerOn() {
@@ -15,6 +142,16 @@ void powerOn() {
   delay(500);
   digitalWrite(CAM_PWDN, LOW);
   delay(500);
+}
+
+void runConnectionDiagnostics() {
+  Serial.println("[camera-diag] Temporary camera connection test starting.");
+  Serial.println(
+      "[camera-diag] This test does not capture an image or transmit anything.");
+  runSccbAttempt(20000000UL);
+  runSccbAttempt(16000000UL);
+  Serial.println(
+      "[camera-diag] Test complete; camera powered off for normal scheduling.");
 }
 
 esp_err_t begin() {

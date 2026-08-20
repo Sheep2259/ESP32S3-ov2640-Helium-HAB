@@ -8,6 +8,10 @@ namespace camera {
 // Powers the camera rails and takes the OV2640 out of power-down.
 void powerOn();
 
+// Temporary, non-capturing connection test. Power-cycles the camera and checks
+// SCCB communication at the supplied XCLK frequencies, then leaves it off.
+void runConnectionDiagnostics();
+
 // Starts the ESP32 camera driver after powerOn().
 esp_err_t begin();
 

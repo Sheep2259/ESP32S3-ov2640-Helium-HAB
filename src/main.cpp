@@ -10,6 +10,7 @@
 #include <mission_diagnostics.h>
 #include <pin_defs.h>
 #include <radio.h>
+#include <serial_packet_test.h>
 #include <image_store.h>
 #include <wspr.h>
 
@@ -160,7 +161,8 @@ bool transmitNextImagePacket() {
   if (slot < 0 || !prepareImageEncoder(slot)) return false;
   helium_jpeg::HeliumPacket packet;
   if (!imageEncoder.getNextPacket(packet)) return false;
-  if (!transmitHelium(packet.data, sizeof(packet.data))) {
+  serial_packet_test::mirrorLoRaPacket(packet.data, packet.length);
+  if (!transmitHelium(packet.data, packet.length)) {
     imageEncoderReady = false;
     activeImageSlot = -1;
     return false;
@@ -192,6 +194,7 @@ void captureImage() {
     telemetry.capture_ms = static_cast<uint16_t>(
         min(static_cast<unsigned long>(UINT16_MAX), millis() - captureStarted));
     cameraCaptureError = image_store::save(*frame, telemetry) != ESP_OK;
+    if (!cameraCaptureError) serial_packet_test::imageStored();
     camera::release(frame);
   }
   camera::powerOff();
@@ -283,7 +286,7 @@ void setup() {
   pinMode(kBoardLed, INPUT);
 
   Serial.begin(115200);
-  delay(250);
+  delay(HAB_STARTUP_DELAY_MS);
   Serial.println("[boot] HAB firmware starting.");
   initialiseMissionDiagnostics();
   if (esp_task_wdt_init(HAB_WATCHDOG_TIMEOUT_SECONDS, true) == ESP_OK &&
@@ -294,6 +297,10 @@ void setup() {
     Serial.println("[watchdog] Initialisation failed.");
   }
 
+#if HAB_TEMP_CAMERA_DIAGNOSTICS
+  camera::runConnectionDiagnostics();
+#endif
+
   littleFsError = !image_store::begin();
   Serial.printf("[storage] %s; %u queued image(s).\n",
                 littleFsError ? "unavailable" : "ready",
@@ -302,6 +309,7 @@ void setup() {
   GEOFENCE_inhibit();
   initLoRaWAN();
   wsprRadio.begin();
+  serial_packet_test::begin();
   Serial.println("[boot] Setup complete; waiting for GPS.");
 }
 
@@ -318,5 +326,24 @@ void loop() {
   updateImageTransferMode(nowUtc);
   maybeCaptureImage(nowUtc);
   maybeTransmitImagePacket();
+  const serial_packet_test::FlightStatus serialStatus = {
+      millis() / 1000UL,
+      nowUtc,
+      !gpsError,
+      GPSTimeFresh(),
+      lat,
+      lng,
+      alt,
+      hdop,
+      sats,
+      static_cast<uint8_t>(GEOFENCE_region),
+      GEOFENCE_no_tx,
+      lorawanNetworkReachable(),
+      imageTransferMode,
+      image_store::imageCount(),
+      image_store::remainingPacketCount(),
+      currentStatusFlags(),
+  };
+  serial_packet_test::service(serialStatus, feedWatchdog);
   delay(5);
 }

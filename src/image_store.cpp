@@ -16,6 +16,9 @@ constexpr size_t kReserveBytes = 2048U;
 constexpr uint8_t kProgressCheckpointPackets = 16;
 constexpr uint32_t kQueueMagic = 0x48514232UL;  // "HQB2"
 constexpr uint16_t kQueueVersion = 2;
+constexpr char kLittleFsBasePath[] = "/littlefs";
+constexpr char kLittleFsPartitionLabel[] = "littlefs";
+constexpr uint8_t kLittleFsMaxOpenFiles = 10;
 
 Preferences preferences;
 uint16_t remainingPackets[kSlotCount] = {};
@@ -308,17 +311,45 @@ bool begin() {
 
   bool mounted = false;
   for (uint8_t attempt = 0; attempt < 3 && !mounted; ++attempt) {
-    mounted = LittleFS.begin(false);
+    mounted = LittleFS.begin(false, kLittleFsBasePath, kLittleFsMaxOpenFiles,
+                             kLittleFsPartitionLabel);
     if (!mounted) {
       LittleFS.end();
       delay(50);
     }
   }
   if (!mounted) {
-    recordStorageFault();
     Serial.println(
-        "LittleFS mount failed after bounded retries; formatting is disabled.");
-    return false;
+        "LittleFS mount failed after bounded retries; formatting filesystem.");
+    if (!LittleFS.format() ||
+        !LittleFS.begin(false, kLittleFsBasePath, kLittleFsMaxOpenFiles,
+                        kLittleFsPartitionLabel)) {
+      LittleFS.end();
+      recordStorageFault();
+      Serial.println("LittleFS format/recovery failed; storage unavailable.");
+      return false;
+    }
+
+    // Formatting removes every JPEG and telemetry file. Preserve the rolling
+    // ID from a valid NVS queue when possible, but clear queue membership and
+    // capture time so erased files cannot block or masquerade as live images.
+    const bool queueLoaded = loadQueueRecord();
+    const uint16_t preservedNextImageId =
+        queueLoaded ? nextImageId : preferences.getUShort("next_image_id", 0);
+    memset(remainingPackets, 0, sizeof(remainingPackets));
+    memset(imageIds, 0, sizeof(imageIds));
+    nextImageId = preservedNextImageId;
+    lastCapture = 0;
+    packetsSinceCheckpoint = 0;
+    if (preferences.putUInt("last_capture", 0) != sizeof(lastCapture)) {
+      recordStorageFault();
+      Serial.println("Failed to clear capture time after filesystem format.");
+    }
+    persistProgress();
+    recordStorageRepair();
+    Serial.println(
+        "LittleFS recovery complete; previous stored images were erased.");
+    return true;
   }
 
   lastCapture = preferences.getUInt("last_capture", 0);
@@ -370,6 +401,18 @@ bool canAcceptCapture() {
 }
 
 int oldestImage() { return oldestImageExcept(-1); }
+
+int newestImage() {
+  int selected = -1;
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    if (remainingPackets[i] == 0) continue;
+    if (selected < 0 ||
+        static_cast<int16_t>(imageIds[i] - imageIds[selected]) > 0) {
+      selected = static_cast<int>(i);
+    }
+  }
+  return selected;
+}
 
 bool prepareEncoder(int slot, helium_jpeg::HeliumJPEG& encoder) {
   if (slot < 0 || slot >= static_cast<int>(kSlotCount) ||

@@ -16,3 +16,9 @@ queue/progress commits, packet transmission, and image cleanup. On reboot,
 partial/unpaired files should be removed, complete file pairs should be
 recovered, and the image queue should remain usable. Use a disposable device or
 filesystem image for these tests.
+
+After three failed LittleFS mount attempts, firmware now formats the filesystem
+once and remounts it. This recovers blank or structurally corrupt filesystems but
+necessarily erases stored images. Queue membership and the last-capture time are
+cleared while the rolling image ID is preserved from NVS when possible. A failed
+format/remount leaves storage disabled and records a persistent storage fault.

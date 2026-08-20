@@ -20,6 +20,7 @@ esp_err_t save(const camera_fb_t& frame,
                helium_jpeg::HeliumTelemetry telemetry);
 
 int oldestImage();
+int newestImage();
 bool prepareEncoder(int slot, helium_jpeg::HeliumJPEG& encoder);
 
 // Advances queue progress after a confirmed uplink. Returns true when the

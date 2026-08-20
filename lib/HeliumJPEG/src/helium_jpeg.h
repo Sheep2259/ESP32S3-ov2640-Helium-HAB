@@ -1,7 +1,7 @@
 /*
  * HeliumJPEG — JPEG-over-LoRaWAN Packetizer
  *
- * Splits OV2640 JPEG files into 210-byte LoRaWAN-friendly packets with
+ * Splits OV2640 JPEG files into LoRaWAN-friendly packets of up to 210 bytes with
  * per-packet independent decodability for Helium IoT uplink.
  *
  * Hardware: ESP32-S3-WROOM-1U-N16R2
@@ -23,23 +23,18 @@ namespace helium_jpeg {
 // Constants
 // ─────────────────────────────────────────────────────────────────────
 
-/// Total packet size in bytes.
+/// Maximum packet size in bytes.
 static constexpr int PACKET_SIZE = 210;
 
-/// Header size in bytes.
-static constexpr int HEADER_SIZE = 8;
+/// Metadata and data header sizes in bytes.
+static constexpr int METADATA_HEADER_SIZE = 8;
+static constexpr int DATA_HEADER_SIZE = 7;
 
-/// Payload size in bytes (total - header).
-static constexpr int PAYLOAD_SIZE = PACKET_SIZE - HEADER_SIZE; // 202
-
-/// Reserved bytes at the start of each data payload.
-///
-/// The scan stream is independently DC-reencoded, so predictor state does
-/// not have to be sent.  Keep these two bytes for wire compatibility.
-static constexpr int DC_STATE_SIZE = 2;
+/// Metadata payload size in bytes.
+static constexpr int PAYLOAD_SIZE = PACKET_SIZE - METADATA_HEADER_SIZE; // 202
 
 /// Usable scan data bytes per data packet.
-static constexpr int SCAN_DATA_PER_PACKET = PAYLOAD_SIZE - DC_STATE_SIZE; // 200
+static constexpr int SCAN_DATA_PER_PACKET = PACKET_SIZE - DATA_HEADER_SIZE; // 203
 
 // ─────────────────────────────────────────────────────────────────────
 // Subsampling Mode
@@ -51,12 +46,14 @@ enum Subsampling : uint8_t {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// HeliumPacket — 210-byte packet ready for LoRaWAN uplink
+// HeliumPacket — Packet ready for LoRaWAN uplink
 // ─────────────────────────────────────────────────────────────────────
 struct HeliumPacket {
-    // Data header byte 6 is the exact MCU count. Bytes 8-9 are reserved;
-    // scan data begins at byte 10.
+    // Data packets have a 7-byte header and scan data begins at byte 7.
+    // Metadata is identified by packet ID zero and has an eighth header byte
+    // containing its subsampling mode. Metadata remains fixed at 210 bytes.
     uint8_t data[PACKET_SIZE];
+    size_t length = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -159,7 +156,8 @@ public:
     void setTelemetry(const HeliumTelemetry& telem);
 
     /// Get the next packet in sequence.
-    /// Returns false when all packets have been yielded.
+    /// Returns false when all packets have been yielded. On success, pkt.length
+    /// is the exact number of bytes to transmit from pkt.data.
     /// Metadata packets are distributed across the image packet stream.
     bool getNextPacket(HeliumPacket& pkt);
 

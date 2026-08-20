@@ -2,7 +2,7 @@
  * HeliumJPEG — Main Encoder Implementation
  *
  * Parses a JPEG file, walks the Huffman bitstream to find MCU boundaries,
- * splits into 210-byte packets with per-packet DC predictor reset for
+ * splits into packets of up to 210 bytes with per-packet DC predictor reset for
  * independent decodability.
  *
  * SPDX-License-Identifier: MIT
@@ -615,6 +615,8 @@ bool HeliumJPEG::reEncodeDC(uint8_t* scan_buf, size_t scan_len,
 bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
     if (!impl_) return false;
 
+    pkt.length = 0;
+
     int idx = impl_->current_packet_index;
     if (idx >= impl_->data_packet_count && impl_->metadata_sent >= impl_->meta_repeat) return false;
 
@@ -634,10 +636,11 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
         writeU16BE(h + 2, 0);               // packet_id = 0 (metadata)
         writeU16BE(h + 4, 0);               // mcu_index = 0
         h[6] = 0;                           // mcu_count = 0 for metadata
-        h[7] = 0x80 | ((impl_->jpeg_info.subsampling & 0x07) << 4);  // IS_META=1, subsampling
+        h[7] = impl_->jpeg_info.subsampling & 0x07;
 
         // Payload
-        memcpy(h + HEADER_SIZE, impl_->meta_payload, PAYLOAD_SIZE);
+        memcpy(h + METADATA_HEADER_SIZE, impl_->meta_payload, PAYLOAD_SIZE);
+        pkt.length = PACKET_SIZE;
 
     } else {
         // ── Data packet ──
@@ -652,13 +655,6 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
         writeU16BE(h + 2, (uint16_t)(idx + 1));      // packet_id (1-based)
         writeU16BE(h + 4, plan.first_mcu);             // mcu_index
         h[6] = (uint8_t)plan.mcu_count;                // exact packet framing
-        h[7] = (impl_->jpeg_info.subsampling & 0x07) << 4;  // IS_META=0, subsampling
-
-        // Reserved payload bytes (the stream itself starts with DC predictors
-        // reset to zero after re-encoding).
-        h[HEADER_SIZE + 0] = 0;
-        h[HEADER_SIZE + 1] = 0;
-
         // Payload: Re-encoded scan data
         // Extract the raw scan bytes for this packet's MCU range
         uint32_t start = plan.scan_byte_start;
@@ -671,7 +667,7 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
         }
 
         uint8_t* scan_src = impl_->scan_buffer + start;
-        uint8_t* scan_dst = h + HEADER_SIZE + DC_STATE_SIZE;
+        uint8_t* scan_dst = h + DATA_HEADER_SIZE;
 
         // Re-encode the first MCU's DC coefficients
         size_t written = 0;
@@ -689,6 +685,16 @@ bool HeliumJPEG::getNextPacket(HeliumPacket& pkt) {
             impl_->error = "Packet DC re-encoding exceeded capacity or failed";
             return false;
         }
+
+        // LoRaWAN carries the application payload length, so do not transmit
+        // the zero-filled tail of the fixed-capacity packet buffer.  `written`
+        // is authoritative; trimming by byte value would corrupt a valid scan
+        // stream that happens to end in one or more 0x00 bytes.
+        if (written == 0 || written > SCAN_DATA_PER_PACKET) {
+            impl_->error = "Packet encoder returned an invalid length";
+            return false;
+        }
+        pkt.length = DATA_HEADER_SIZE + written;
     }
 
     if (emitMetadata) impl_->metadata_sent++;
