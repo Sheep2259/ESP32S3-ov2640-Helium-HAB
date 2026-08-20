@@ -10,6 +10,8 @@
 bool initLoRaWAN();
 void serviceLoRaWAN(HeliumRegion region);
 bool lorawanCanTransmit();
+bool lorawanNetworkReachable();
+bool lorawanUplinkDue();
 
 // Sends one binary LoRaWAN uplink on the configured application port.
 // The geofence remains the final transmit inhibit.

@@ -60,9 +60,9 @@ gps/telemetry:
 reliability/deployment:
 - add a watchdog with a flight-appropriate recovery policy.
 - OTA updating is not required and is considered insufficiently reliable for this mission.
-- flight and preflight/test modes should remain separate so test features do not complicate the flight code.
-- production programming/recovery is performed manually with jumpers and serial and has been confirmed working on the manufactured board. flight/preflight diagnostics should use UART, not USB CDC; the current USB-CDC build setting must be changed accordingly.
-- automatic partition erasure, fully transactional dual-generation queue records, and the exact power-cut fault-injection matrix remain design decisions. prefer the simplest implementation that demonstrably survives interrupted JPEG write, telemetry write, queue/progress commit, packet transmit, and file deletion.
+- keep one normal firmware mode. startup, subsystem, and error diagnostics use UART0 at 115200 baud; USB CDC remains disabled.
+- production programming/recovery is performed manually with jumpers and serial and has been confirmed working on the manufactured board.
+- automatic partition erasure and fully transactional dual-generation queue records remain design decisions. prefer the simplest implementation that demonstrably survives external power loss during JPEG write, telemetry write, queue/progress commit, packet transmit, and file deletion.
 
 hardware artifact review notes (reviewed 2026-08-18, corrected 2026-08-19; verified decisions and remaining code implications):
 - the Si5351 reference fitted in the BOM is a 26 MHz EPSON X1G0042110003 (TG-5006CG-12H) TCXO, not a 25 MHz crystal. firmware frequency calculations must explicitly use the measured 26 MHz reference and its calibrated correction. Schematic2 supplies it with 3.3 V although the official recommended maximum is 3.15 V; the manufactured hardware has been tested successfully at 3.3 V and this accepted out-of-spec condition is noted rather than treated as a blocking change. expected minimum internal operating temperature is -10 C, within the TCXO's -30 C rating.
@@ -82,7 +82,7 @@ known implementation changes (recorded for later; not requested in the 2026-08-1
 - make image packet advancement internally consistent on local transmit failure: either deliberately count the failed attempt as a discarded packet or retain/recreate that packet. the current encoder advances while the persisted remaining count does not, which can skip data and eventually stall an image.
 - use the intended approximately +10 dBm value in standard WSPR metadata once the complete external RF chain has been measured; Si5351 drive setting and RF-chain output are separate values.
 - do not format LittleFS immediately after a single mount failure. attempt bounded recovery/diagnosis first and format only when the filesystem is established to be unrecoverable.
-- add the flight watchdog, persistent reset/brownout/join/storage/watchdog counters, and the separate preflight/fault-injection tests. decide LoRaWAN session persistence after the final LNS and LoRaWAN version are known.
+- retain the watchdog and persistent reset/brownout/join/storage/watchdog counters in the normal firmware. use external power-cut testing when storage recovery needs to be validated. decide LoRaWAN session persistence after the final LNS and LoRaWAN version are known.
 
 still tbd / inputs needed before flight freeze:
 - exact LNS/provider, LoRaWAN version, credentials, and whether session persistence is required.

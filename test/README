@@ -1,11 +1,18 @@
+Firmware verification
+=====================
 
-This directory is intended for PlatformIO Test Runner and project tests.
+There is one normal firmware environment:
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+    platformio run -e esp32-s3-hab
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+Connect UART0 at 115200 baud to inspect normal diagnostics. Startup reports the
+watchdog, LittleFS/image queue, LoRaWAN policy, WSPR policy, and GPS wait state.
+Camera captures, storage failures, WSPR frames, joins, and uplink errors also
+report through the same serial connection.
+
+Storage recovery is intentionally part of the normal boot path. For destructive
+power-cut testing, interrupt external power during JPEG writes, telemetry writes,
+queue/progress commits, packet transmission, and image cleanup. On reboot,
+partial/unpaired files should be removed, complete file pairs should be
+recovered, and the image queue should remain usable. Use a disposable device or
+filesystem image for these tests.

@@ -1,38 +1,20 @@
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <TinyGPSPlus.h>
+#include <esp_task_wdt.h>
 
 #include <GPS.h>
-#include <camutils.h>
+#include <camera.h>
 #include <geofence.h>
 #include <helium_jpeg.h>
+#include <mission_config.h>
+#include <mission_diagnostics.h>
 #include <pin_defs.h>
 #include <radio.h>
-#include <wspr_tx.h>
+#include <image_store.h>
+#include <wspr.h>
 
 namespace {
-constexpr unsigned long kLoRaTxIntervalMs = 60000UL;
-// An 80 KB image takes about 6.7 hours at one 200-byte packet per minute.
-// Eight hours prevents an in-coverage queue from growing without bound.
-constexpr unsigned long kImageIntervalMs = 8UL * 60UL * 60UL * 1000UL;
-constexpr unsigned long kFirstCaptureGpsWaitMs = 3UL * 60UL * 1000UL;
-constexpr uint8_t kImageProgressCheckpointPackets = 16;
-
-// WSPR remains physically inhibited until the authorised base tone and
-// declared radiated power are supplied. Do not guess these values: band choice
-// and airborne operation depend on the applicable administration and route.
-constexpr bool kWsprEnabled = true;
-constexpr char kWsprCallsign[] = "M7CWV";
-// Direct-RF lowest tone near the conventional 18.1046 MHz USB dial frequency
-// plus a 1.5 kHz WSPR audio offset. Calibrate the Si5351 before flight.
-constexpr uint64_t kWsprBaseFrequencyCentiHz = 1810610000ULL;
-constexpr int8_t kWsprPowerDbm = 0;
-char wsprGrid[5] = "AA00";
-
-const wspr::Config kWsprConfig(
-    kWsprCallsign, wsprGrid, kWsprBaseFrequencyCentiHz, kWsprPowerDbm,
-    2,  // Base WSPR cadence; the application gates inside regions to 2 hours.
-    25, 0);
+constexpr int kBoardLed = 2;
 
 float lat = 0;
 float lng = 0;
@@ -60,44 +42,30 @@ bool encoderError = false;
 bool cameraCaptureError = false;
 bool cameraInitError = false;
 bool cameraCaptureInProgress = false;
-bool wsprInitialised = false;
 bool loraTxError = false;
-bool capturedThisBoot = false;
-
-unsigned long lastTxTime = 0;
-unsigned long lastImageTime = 0;
-uint8_t packetsSinceImageCheckpoint = 0;
+bool watchdogReady = false;
+bool imageTransferMode = false;
+bool previousNetworkReachable = false;
+uint32_t imageModeStartCycle = UINT32_MAX;
+bool captureAttempted = false;
+unsigned long lastCaptureAttemptMs = 0;
 
 helium_jpeg::HeliumJPEG imageEncoder;
-wspr::Transmitter wsprTransmitter(kWsprConfig, []() {
-  return !cameraCaptureInProgress;
-});
-
-int activeSlot = -1;
+int activeImageSlot = -1;
 bool imageEncoderReady = false;
 
-bool cameraI2cIsIdle() { return !cameraCaptureInProgress; }
-
-bool updateWsprGridFromGps() {
-  if (gpsError || lat < -90.0f || lat >= 90.0f || lng < -180.0f ||
-      lng >= 180.0f) return false;
-
-  const float longitude = lng + 180.0f;
-  const float latitude = lat + 90.0f;
-  wsprGrid[0] = static_cast<char>('A' + static_cast<int>(longitude / 20.0f));
-  wsprGrid[1] = static_cast<char>('A' + static_cast<int>(latitude / 10.0f));
-  wsprGrid[2] = static_cast<char>('0' + static_cast<int>(longitude / 2.0f) % 10);
-  wsprGrid[3] = static_cast<char>('0' + static_cast<int>(latitude) % 10);
-  wsprGrid[4] = '\0';
-  return true;
+void feedWatchdog() {
+  if (watchdogReady) esp_task_wdt_reset();
 }
+
+wspr::MissionRadio wsprRadio(
+    []() { return !cameraCaptureInProgress; }, feedWatchdog);
 
 void updateGps() {
   while (Serial2.available()) {
     if (!gps.encode(Serial2.read())) continue;
     UpdateGPSInfo(lat, lng, age_s, year, month, day, hour, minute, second,
                   centisecond, alt, speed_kmh, course_deg, sats, hdop);
-
     if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
       const unsigned long now = millis();
       if (previousAltitudeMs != 0) {
@@ -112,7 +80,6 @@ void updateGps() {
       previousAltitudeMs = now;
     }
   }
-
   if (gps.location.isValid()) age_s = gps.location.age() / 1000.0f;
   gpsError = !GPSPositionFresh();
   if (gpsError) {
@@ -122,7 +89,6 @@ void updateGps() {
   }
 }
 
-// Howard Hinnant's civil-date conversion, shifted to the Unix epoch.
 int64_t daysFromCivil(int yearValue, unsigned monthValue, unsigned dayValue) {
   yearValue -= monthValue <= 2;
   const int era = (yearValue >= 0 ? yearValue : yearValue - 399) / 400;
@@ -136,10 +102,26 @@ int64_t daysFromCivil(int yearValue, unsigned monthValue, unsigned dayValue) {
 
 uint32_t gpsUnixTime() {
   if (!GPSTimeFresh() || year < 1970 || month < 1 || month > 12 || day < 1 ||
-      day > 31) return 0;
+      day > 31) {
+    return 0;
+  }
   const int64_t epoch = daysFromCivil(year, month, day) * 86400LL +
                         hour * 3600UL + minute * 60UL + second;
   return epoch > 0 && epoch <= UINT32_MAX ? static_cast<uint32_t>(epoch) : 0;
+}
+
+uint16_t currentStatusFlags() {
+  const MissionDiagnostics diagnostics = missionDiagnostics();
+  return (gpsError ? helium_jpeg::STATUS_FLAG_GPS_INVALID : 0) |
+         (littleFsError ? helium_jpeg::STATUS_FLAG_FS_ERROR : 0) |
+         ((cameraInitError || cameraCaptureError)
+              ? helium_jpeg::STATUS_FLAG_CAMERA_ERROR
+              : 0) |
+         (encoderError ? helium_jpeg::STATUS_FLAG_ENCODE_FAILED : 0) |
+         (loraTxError ? helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE : 0) |
+         ((diagnostics.resets != 0)
+              ? helium_jpeg::STATUS_FLAG_UNEXPECTED_REBOOT
+              : 0);
 }
 
 helium_jpeg::HeliumTelemetry captureTelemetry() {
@@ -157,145 +139,135 @@ helium_jpeg::HeliumTelemetry captureTelemetry() {
   value.fix_type = gpsError ? 0 : 3;
   value.timestamp = gpsUnixTime();
   value.uptime = millis() / 1000UL;
-  value.esp_temp = static_cast<int8_t>(constrain(temperatureRead(), -128.0f, 127.0f));
+  value.esp_temp =
+      static_cast<int8_t>(constrain(temperatureRead(), -128.0f, 127.0f));
   value.free_heap_kb = ESP.getFreeHeap() / 1024U;
-  value.status_flags =
-      (gpsError ? helium_jpeg::STATUS_FLAG_GPS_INVALID : 0) |
-      (littleFsError ? helium_jpeg::STATUS_FLAG_FS_ERROR : 0) |
-      ((cameraInitError || cameraCaptureError)
-           ? helium_jpeg::STATUS_FLAG_CAMERA_ERROR
-           : 0) |
-      (encoderError ? helium_jpeg::STATUS_FLAG_ENCODE_FAILED : 0) |
-      (loraTxError ? helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE : 0);
-  // battery_mv and environmental fields stay zero until their actual board
-  // pins/sensors are specified; fabricated readings are worse than missing.
+  value.status_flags = currentStatusFlags();
   return value;
 }
 
 bool prepareImageEncoder(int slot) {
-  if (imageEncoderReady && activeSlot == slot) return true;
-  if (slot < 0 || slot >= static_cast<int>(IMAGE_SLOT_COUNT)) return false;
-
-  const uint16_t imageId = imageIds[slot];
-  char filename[16];
-  imageFilename(imageId, filename, sizeof(filename));
-  File image = LittleFS.open(filename, FILE_READ);
-  if (!image) {
-    discardImageSlot(slot);
-    return false;
-  }
-
-  const int totalPackets = imageEncoder.begin(image, imageId);
-  image.close();
-  helium_jpeg::HeliumTelemetry telemetry = {};
-  if (totalPackets <= 0 || !readImageTelemetry(imageId, telemetry)) {
-    discardImageSlot(slot);
-    return false;
-  }
-
-  if (savedImages[slot] > totalPackets) {
-    savedImages[slot] = static_cast<uint16_t>(totalPackets);
-    persistImageProgress();
-  }
-  imageEncoder.setTelemetry(telemetry);
-  const uint16_t sent = static_cast<uint16_t>(totalPackets) - savedImages[slot];
-  if (!imageEncoder.skipPackets(sent)) {
-    discardImageSlot(slot);
-    return false;
-  }
-
-  activeSlot = slot;
+  if (imageEncoderReady && activeImageSlot == slot) return true;
+  if (!image_store::prepareEncoder(slot, imageEncoder)) return false;
+  activeImageSlot = slot;
   imageEncoderReady = true;
   return true;
 }
 
 bool transmitNextImagePacket() {
-  const int slot = imageEncoderReady ? activeSlot : oldestStoredImage();
+  const int slot = imageEncoderReady ? activeImageSlot
+                                     : image_store::oldestImage();
   if (slot < 0 || !prepareImageEncoder(slot)) return false;
-
   helium_jpeg::HeliumPacket packet;
-  if (!imageEncoder.getNextPacket(packet) ||
-      !transmitHelium(packet.data, sizeof(packet.data))) return false;
-
-  if (savedImages[slot] > 0) --savedImages[slot];
-  if (savedImages[slot] == 0) {
-    // The completion helper orders the telemetry removal and queue commit so
-    // every possible nightly power-loss point can be reconciled on next boot.
-    completeImageSlot(slot);
+  if (!imageEncoder.getNextPacket(packet)) return false;
+  if (!transmitHelium(packet.data, sizeof(packet.data))) {
     imageEncoderReady = false;
-    activeSlot = -1;
-    packetsSinceImageCheckpoint = 0;
-  } else if (++packetsSinceImageCheckpoint >= kImageProgressCheckpointPackets) {
-    persistImageProgress();
-    packetsSinceImageCheckpoint = 0;
+    activeImageSlot = -1;
+    return false;
+  }
+  if (image_store::packetSent(slot)) {
+    imageEncoderReady = false;
+    activeImageSlot = -1;
   }
   return true;
 }
 
 void captureImage() {
-  lastImageTime = millis();
-  capturedThisBoot = true;
-  if (littleFsError) {
-    cameraCaptureError = true;
+  if (littleFsError || !image_store::canAcceptCapture()) {
+    if (!littleFsError) {
+      Serial.println("Image capture skipped: archival store is full.");
+    }
     return;
   }
-  if (!imageStoreCanAcceptCapture()) {
-    Serial.println("Image capture skipped: archival store is full.");
-    return;
-  }
+
   cameraCaptureInProgress = true;
-  resetCamera();
-  cameraInitError = StartCamera() != ESP_OK;
-  cameraCaptureError = cameraInitError ||
-                       savePhoto(captureTelemetry()) != ESP_OK;
-  stopCamera();
+  const unsigned long captureStarted = millis();
+  camera::powerOn();
+  cameraInitError = camera::begin() != ESP_OK;
+  camera_fb_t* frame = cameraInitError ? nullptr : camera::captureJpeg();
+  if (frame == nullptr) {
+    cameraCaptureError = true;
+  } else {
+    helium_jpeg::HeliumTelemetry telemetry = captureTelemetry();
+    telemetry.capture_ms = static_cast<uint16_t>(
+        min(static_cast<unsigned long>(UINT16_MAX), millis() - captureStarted));
+    cameraCaptureError = image_store::save(*frame, telemetry) != ESP_OK;
+    camera::release(frame);
+  }
+  camera::powerOff();
   cameraCaptureInProgress = false;
+  Serial.println(cameraCaptureError ? "[camera] Capture failed."
+                                    : "[camera] Image stored.");
 }
 
-void initialiseWspr() {
-  if (!kWsprEnabled || !cameraI2cIsIdle()) return;
-  const wspr::Result result = wsprTransmitter.begin();
-  wsprInitialised = result == wspr::Result::Ok;
-  if (!wsprInitialised) {
-    Serial.printf("WSPR disabled: initialisation error %u\n",
-                  static_cast<unsigned>(result));
-  }
+wspr::MissionData currentWsprData(uint32_t nowUtc) {
+  wspr::MissionData data = {};
+  data.unixTime = nowUtc;
+  data.latitude = lat;
+  data.longitude = lng;
+  data.altitudeMetres = alt;
+  data.hdop = hdop;
+  data.statusFlags = currentStatusFlags();
+  data.remainingImagePackets = image_store::remainingPacketCount();
+  data.storedImages = image_store::imageCount();
+  data.satellites = sats;
+  data.hour = hour;
+  data.minute = minute;
+  data.second = second;
+  data.centisecond = centisecond;
+  return data;
 }
 
-bool maybeTransmitWspr() {
-  if (!kWsprEnabled || !wsprInitialised || gpsError || !GPSTimeFresh() ||
-      !updateWsprGridFromGps()) return false;
-
-  const wspr::UtcTime utc = {minute, second, centisecond};
-  const bool insideHeliumRegion = GEOFENCE_region != HeliumRegion::None;
-  if (insideHeliumRegion && (hour % 2U != 0 || minute != 0)) return false;
-  if (!wsprTransmitter.due(utc)) return false;
-  Serial.printf("WSPR %s %s at %02u:%02u:%02u UTC\n", kWsprCallsign,
-                wsprGrid, hour, minute, second);
-  const wspr::Result result = wsprTransmitter.transmitBlocking(utc);
-  if (result != wspr::Result::Ok) {
-    Serial.printf("WSPR transmission error %u\n", static_cast<unsigned>(result));
+void updateImageTransferMode(uint32_t nowUtc) {
+  const bool reachable = lorawanNetworkReachable();
+  if (!reachable || nowUtc == 0 || image_store::oldestImage() < 0) {
+    imageTransferMode = false;
+    imageModeStartCycle = UINT32_MAX;
+  } else if (!imageTransferMode &&
+             (!previousNetworkReachable || imageModeStartCycle == UINT32_MAX)) {
+    imageModeStartCycle = nowUtc / 360UL + 1UL;
   }
-  // A WSPR frame blocks GPS parsing for about 111 seconds. Force RF inhibit
-  // until the next loop has parsed a genuinely fresh position and time.
+  if (reachable && imageModeStartCycle != UINT32_MAX &&
+      nowUtc / 360UL >= imageModeStartCycle) {
+    imageTransferMode = true;
+    imageModeStartCycle = UINT32_MAX;
+  }
+  previousNetworkReachable = reachable;
+}
+
+bool maybeTransmitScheduledRf(uint32_t nowUtc) {
+  if (gpsError || !GPSTimeFresh()) return false;
+  if (!wsprRadio.transmitIfDue(currentWsprData(nowUtc), imageTransferMode)) {
+    return false;
+  }
   gpsError = true;
   GEOFENCE_inhibit();
   return true;
 }
 
-void maybeCaptureImage() {
-  if (!capturedThisBoot) {
-    if (!gpsError || millis() >= kFirstCaptureGpsWaitMs) captureImage();
+void maybeCaptureImage(uint32_t nowUtc) {
+  if (littleFsError || gpsError || nowUtc == 0 || minute % 6U >= 2U) return;
+  const uint32_t lastCapture = image_store::lastCaptureUtc();
+  if (lastCapture != 0 &&
+      (nowUtc < lastCapture ||
+       nowUtc - lastCapture < HAB_IMAGE_INTERVAL_SECONDS)) {
     return;
   }
-  if (millis() - lastImageTime >= kImageIntervalMs) captureImage();
+  if (!image_store::canAcceptCapture()) return;
+  if (captureAttempted &&
+      millis() - lastCaptureAttemptMs < HAB_CAPTURE_RETRY_MS) {
+    return;
+  }
+  captureAttempted = true;
+  lastCaptureAttemptMs = millis();
+  captureImage();
 }
 
 void maybeTransmitImagePacket() {
-  if (!lorawanCanTransmit() || oldestStoredImage() < 0 ||
-      millis() - lastTxTime < kLoRaTxIntervalMs) return;
-
-  lastTxTime = millis();
+  if (!imageTransferMode || !lorawanUplinkDue() ||
+      image_store::oldestImage() < 0) {
+    return;
+  }
   if (transmitNextImagePacket()) {
     encoderError = false;
     loraTxError = false;
@@ -307,30 +279,44 @@ void maybeTransmitImagePacket() {
 }  // namespace
 
 void setup() {
-  // Board2 LED1 is wired from GPIO2 (ESP module physical pin 38) directly to
-  // GND without an external series resistor. The manufactured board was
-  // bench-tested with GPIO2 kept as an input and its internal pull-up used as
-  // the current-limited source. Do not drive GPIO2 push-pull high unless an
-  // external current limiter is added. U0TXD is separate, on physical pin 37.
-  Serial.begin(115200);
-  delay(1000);
+  camera::powerOff();
+  pinMode(kBoardLed, INPUT);
 
-  littleFsError = !initialiseImageStore();
-  stopCamera();
+  Serial.begin(115200);
+  delay(250);
+  Serial.println("[boot] HAB firmware starting.");
+  initialiseMissionDiagnostics();
+  if (esp_task_wdt_init(HAB_WATCHDOG_TIMEOUT_SECONDS, true) == ESP_OK &&
+      esp_task_wdt_add(nullptr) == ESP_OK) {
+    watchdogReady = true;
+    Serial.println("[watchdog] Ready.");
+  } else {
+    Serial.println("[watchdog] Initialisation failed.");
+  }
+
+  littleFsError = !image_store::begin();
+  Serial.printf("[storage] %s; %u queued image(s).\n",
+                littleFsError ? "unavailable" : "ready",
+                image_store::imageCount());
   Serial2.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, -1);
   GEOFENCE_inhibit();
   initLoRaWAN();
-  initialiseWspr();
+  wsprRadio.begin();
+  Serial.println("[boot] Setup complete; waiting for GPS.");
 }
 
 void loop() {
+  feedWatchdog();
   updateGps();
-  if (maybeTransmitWspr()) {
+  const uint32_t nowUtc = gpsUnixTime();
+  updateImageTransferMode(nowUtc);
+  if (maybeTransmitScheduledRf(nowUtc)) {
     delay(5);
     return;
   }
   serviceLoRaWAN(GEOFENCE_region);
-  maybeCaptureImage();
+  updateImageTransferMode(nowUtc);
+  maybeCaptureImage(nowUtc);
   maybeTransmitImagePacket();
   delay(5);
 }

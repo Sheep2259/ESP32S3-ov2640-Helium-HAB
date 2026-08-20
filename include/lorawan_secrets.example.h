@@ -3,6 +3,9 @@
 // Copy this file to include/lorawan_secrets.h. Register two LNS devices with
 // different DevEUIs: one EU868 profile and one US915 sub-band 2 profile. Never
 // commit the populated copy.
+// In addition, set HAB_LORAWAN_POLICY_REVIEWED=1 in the flight build flags
+// only after the regional data-rate, power, dwell/duty-cycle, antenna and
+// geofence assumptions in src/lorawan_config.h have been reviewed.
 
 constexpr bool EU_LORAWAN_1_1 = false;
 constexpr uint64_t EU_LORAWAN_JOIN_EUI = 0x0000000000000000;

@@ -10,6 +10,14 @@ constexpr uint8_t LORAWAN_US_DATA_RATE = 4;
 constexpr uint8_t LORAWAN_US_SUB_BAND = 2;
 constexpr uint8_t LORAWAN_APP_PORT = 1;
 constexpr unsigned long LORAWAN_JOIN_RETRY_MS = 15UL * 60UL * 1000UL;
+// These are provisional hardware-capable settings, not a declaration that
+// they are lawful for the final antenna/route. HAB_LORAWAN_POLICY_REVIEWED
+// remains the flight transmit gate until the regional review is complete.
+constexpr int8_t LORAWAN_EU_TX_POWER_DBM = 14;
+constexpr int8_t LORAWAN_US_TX_POWER_DBM = 20;
+constexpr unsigned long LORAWAN_EU_MIN_UPLINK_INTERVAL_MS = 1000UL;
+constexpr unsigned long LORAWAN_US_MIN_UPLINK_INTERVAL_MS = 1000UL;
+constexpr uint32_t LORAWAN_US_DWELL_TIME_MS = 400UL;
 
 // Set the corresponding *_LORAWAN_1_1 flag true only when that LNS device
 // profile is explicitly LoRaWAN 1.1. Most hosted profiles are LoRaWAN 1.0.x.
