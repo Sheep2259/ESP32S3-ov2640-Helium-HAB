@@ -187,12 +187,26 @@ esp_err_t begin() {
 }
 
 camera_fb_t* captureJpeg() {
+  // Allow automatic exposure and gain to converge after power-up.
+  delay(1000);
+
+  for (uint8_t i = 0; i < 3; ++i) {
+    camera_fb_t* warmup = esp_camera_fb_get();
+    if (warmup != nullptr) {
+      esp_camera_fb_return(warmup);
+    }
+    delay(150);
+  }
+
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     camera_fb_t* frame = esp_camera_fb_get();
-    if (frame != nullptr && frame->format == PIXFORMAT_JPEG) return frame;
+    if (frame != nullptr && frame->format == PIXFORMAT_JPEG) {
+      return frame;
+    }
     release(frame);
     delay(200);
   }
+
   return nullptr;
 }
 
