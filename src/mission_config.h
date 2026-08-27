@@ -12,7 +12,7 @@
 // does not trigger hardware, enable RF, or advance/delete the mission queue.
 // Restore this to 0 after testing because packet dumps can delay the flight loop.
 #ifndef HAB_SERIAL_PACKET_TEST_MODE
-#define HAB_SERIAL_PACKET_TEST_MODE 1
+#define HAB_SERIAL_PACKET_TEST_MODE 0
 #endif
 
 // TEMPORARY CAMERA CONNECTION DIAGNOSTICS. 1 runs a read-only SCCB test once
@@ -21,7 +21,7 @@
 // 20 MHz and 16 MHz XCLK. It does not capture/store an image or enable RF.
 // Restore this to 0 after the camera fault has been diagnosed.
 #ifndef HAB_TEMP_CAMERA_DIAGNOSTICS
-#define HAB_TEMP_CAMERA_DIAGNOSTICS 1
+#define HAB_TEMP_CAMERA_DIAGNOSTICS 0
 #endif
 
 // 0: do not initialise the Si5351 and never produce WSPR/custom RF on CLK0.
@@ -35,7 +35,7 @@
 // Zero is deliberately invalid, so authorising WSPR without also supplying a
 // reviewed frequency still leaves this transmitter disabled at startup.
 #ifndef HAB_WSPR_BASE_FREQUENCY_CENTIHZ
-#define HAB_WSPR_BASE_FREQUENCY_CENTIHZ 0ULL
+#define HAB_WSPR_BASE_FREQUENCY_CENTIHZ 1810618000ULL
 #endif
 
 // Power value announced inside a standard WSPR message. This does NOT adjust
@@ -57,7 +57,7 @@
 // region also has valid credentials. It does not bypass the GPS/geofence,
 // credential, duty-cycle, dwell-time, or network-evidence checks.
 #ifndef HAB_LORAWAN_POLICY_REVIEWED
-#define HAB_LORAWAN_POLICY_REVIEWED 0
+#define HAB_LORAWAN_POLICY_REVIEWED 1
 #endif
 
 // Callsign encoded in standard WSPR frames; change it to the station legally
