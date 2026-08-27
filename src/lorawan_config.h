@@ -10,6 +10,16 @@ constexpr uint8_t LORAWAN_US_DATA_RATE = 4;
 constexpr uint8_t LORAWAN_US_SUB_BAND = 2;
 constexpr uint8_t LORAWAN_APP_PORT = 1;
 constexpr unsigned long LORAWAN_JOIN_RETRY_MS = 15UL * 60UL * 1000UL;
+// While image data is flowing, request explicit network evidence at this
+// cadence. The LinkCheckReq is piggybacked on the next ordinary image uplink.
+constexpr unsigned long LORAWAN_LINK_CHECK_INTERVAL_MS =
+    10UL * 60UL * 1000UL;
+// A missed periodic check freezes image progress immediately. Keep the active
+// session for a small, bounded set of MAC-only probes so each new uplink can be
+// heard by a different gateway before falling back to a fresh OTAA exchange.
+constexpr uint8_t LORAWAN_LINK_CHECK_RECOVERY_ATTEMPTS = 3;
+constexpr unsigned long LORAWAN_LINK_CHECK_RECOVERY_INTERVAL_MS =
+    2UL * 60UL * 1000UL;
 // These are provisional hardware-capable settings, not a declaration that
 // they are lawful for the final antenna/route. HAB_LORAWAN_POLICY_REVIEWED
 // remains the flight transmit gate until the regional review is complete.

@@ -71,8 +71,8 @@ constexpr uint32_t HAB_SI5351_REFERENCE_HZ = 26000000UL;
 // Minimum UTC interval between stored photos. A due capture additionally waits
 // for a fresh GPS fix, free archival space, and the first two minutes of a
 // six-minute mission cycle. With no prior image, the first eligible fix can
-// trigger a capture immediately.
-constexpr uint32_t HAB_IMAGE_INTERVAL_SECONDS = 8UL * 60UL * 60UL;
+// trigger a capture immediately. 8UL * 60UL * 60UL;
+constexpr uint32_t HAB_IMAGE_INTERVAL_SECONDS = 10UL * 60UL;
 
 // Minimum delay before retrying after an eligible camera capture attempt that
 // did not produce a stored image. Successful captures use the longer interval
