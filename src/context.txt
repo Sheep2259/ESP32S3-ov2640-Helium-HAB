@@ -9,7 +9,7 @@ it will take an image when it turns on for the day, and every 5 (or other, depen
 the storage system must account for the unexpected turnoff, by being able to recover from a range of possible outcomes from turnoff during write.
 
 radios specific funtion: as stated, the helium transmitter needs to stay close to the legal limits in eu and us, and maximise datarate. the downlinks from helium groundstations to the board should be limited/avoided, as in no asking for retransmits. that said, it should be fairly sure packets will be recieved when they are transmitted.
-the si5351 transmits wspr over 17m band, transmit alternating 2m windows, to give the gps time to get a fix inbetween. ideally, telemetry should be incorporated with the traquito system, so i can know alt, more precice location, number of images stored.
+the si5351 transmits wspr over 17m band using a 10-minute U4B sequence. the regular message supplies grid4, Basic Telemetry supplies grid characters 5/6 plus standard flight data, and WSPR TV Custom Telemetry supplies mission state and diagnostics.
 while image data can be transmitted, dont bother as much with wspr, maybe one frame every 2 hours as a backup. importantly, the geofence zones do not indicate image data can be transmitted, should probably use helium connection for that.
 
 
@@ -48,8 +48,8 @@ helium/lorawan:
 wspr/custom telemetry:
 - callsign M7CWV is confirmed. legal/licensing responsibility is handled separately; firmware should use supplied authorised settings and fail safe when they are absent.
 - use the standard 17 m WSPR frequency. intended radiated/conducted power is approximately +10 dBm, with a low-pass filter. antenna/RF characteristics have been measured/documented, but Si5351 frequency correction is not yet calibrated.
-- normal cycle is one 2-minute GPS/no-transmit window, one 2-minute standard WSPR frame, then one 2-minute custom telemetry frame, repeated. do not transmit without valid GPS time and position.
-- custom WSPR-adjacent telemetry is preferred over adopting Traquito unchanged. priority fields are extended location, stored-image count, then ESP die temperature. add a separate lower-priority diagnostic telemetry packet containing persistent reset reason/brownout, failed-join, storage-repair, watchdog, and similar mission counters.
+- normal operation uses a valid U4B 10-minute sequence: regular WSPR, U4B Basic Telemetry, mission-state CT, alternating diagnostic CT A/B, then one silent slot. do not transmit without valid GPS time and position.
+- use WSPR TV's U4B Custom Telemetry wire format so ordinary WSPR receivers report every frame. grid5/6, altitude, ESP die temperature, and speed are carried by Basic Telemetry; CT carries the image queue, GPS quality, status, and persistent diagnostic counters.
 - inside a legal Helium region but without a reachable ground station, retain the normal WSPR/telemetry cadence. once a ground station is found, complete the current WSPR/telemetry sequence and prioritize image transfer.
 
 gps/telemetry:
@@ -76,7 +76,7 @@ known implementation changes (recorded for later; not requested in the 2026-08-1
 - initialise the Si5351 calculations with the actual 26 MHz reference instead of the library's 25 MHz default, then apply the measured correction and final authorised lowest-tone frequency.
 - replace the per-boot/millis image timer with a GPS-UTC-based last-successful-capture timestamp persisted across resets; do not take a startup image unless the persistent 8-hour condition is satisfied.
 - change the build/diagnostic configuration from USB CDC to the already validated UART0 path. LED1 is on GPIO2 and is electrically separate from U0TXD, so UART diagnostics do not need an LED-specific workaround.
-- implement the required 2-minute GPS/silence -> 2-minute standard WSPR -> 2-minute custom telemetry cycle. add extended position/image-count/die-temperature telemetry and the separate persistent diagnostic packet.
+- retain the U4B regular -> Basic -> mission CT -> alternating diagnostics CT sequence and its final silent/capture slot.
 - separate legal-region selection from live Helium reachability. do not reduce WSPR merely because a geofence matches; require a successful join plus suitably fresh network evidence, expire stale reachability, and finish the current WSPR/telemetry sequence before changing modes.
 - replace the fixed one-minute LoRaWAN image cadence and fixed regional data-rate assumptions with reviewed per-frequency-plan payload, data-rate, power, dwell-time/duty-cycle, and cadence policy.
 - make image packet advancement internally consistent on local transmit failure: either deliberately count the failed attempt as a discarded packet or retain/recreate that packet. the current encoder advances while the persisted remaining count does not, which can skip data and eventually stall an image.
@@ -87,7 +87,7 @@ known implementation changes (recorded for later; not requested in the 2026-08-1
 still tbd / inputs needed before flight freeze:
 - exact LNS/provider, LoRaWAN version, credentials, and whether session persistence is required.
 - final regional polygons/frequency plans and reviewed legal RF limits; exact LoRaWAN cadence, output power, antenna-loss/gain assumptions, and coverage-evidence timeout.
-- exact custom telemetry encoding, diagnostic packet cadence, and transition behavior if reachability changes mid-image.
+- final registered U4B channel and the WSPR TV CT decoder URL used for the flight.
 - final WSPR lowest-tone frequency, measured 26 MHz Si5351 reference/correction, and verified +10 dBm RF level after the external filtering/matching/amplification chain.
 - ATGM336H firmware revision, supply peak-current margin, and final typical/worst-case JPEG size measurements.
 - policy and implementation for unrecoverable filesystem detection, atomic queue commits, watchdog thresholds, and power-cut testing.

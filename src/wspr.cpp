@@ -7,17 +7,22 @@
 
 #include <cstring>
 
+#include <helium_jpeg.h>
+
 #include "mission_config.h"
 #include "mission_diagnostics.h"
 #include "pin_defs.h"
+#include "wspr_telemetry.h"
 
 namespace wspr {
 namespace {
 constexpr size_t kFrameSymbols = 162;
-constexpr uint8_t kDiagnosticTelemetryPeriod = 10;
 constexpr uint64_t kToneSpacingCentiHz = 146;
 constexpr uint64_t kSymbolNumeratorUs = 8192ULL * 1000000ULL;
 constexpr uint32_t kSymbolDenominator = 12000;
+constexpr uint8_t kBasicSlot = 1;
+constexpr uint8_t kMissionStateSlot = 2;
+constexpr uint8_t kDiagnosticsSlot = 3;
 
 struct UtcTime {
   uint8_t minute;
@@ -54,6 +59,8 @@ class Transmitter {
   Result begin();
   bool due(const UtcTime& utc) const;
   Result transmit(const UtcTime& utc);
+  Result transmitMessage(const UtcTime& utc, const char* callsign,
+                         const char* grid, int8_t powerDbm);
   Result transmitSymbols(const uint8_t* symbols, size_t count);
 
  private:
@@ -67,23 +74,6 @@ class Transmitter {
   Si5351 si5351_;
   bool ready_ = false;
 };
-
-struct PositionTelemetry {
-  uint32_t unixTime;
-  int32_t latitudeMicrodegrees;
-  int32_t longitudeMicrodegrees;
-  int16_t altitudeMetres;
-  uint8_t storedImages;
-  uint16_t remainingPackets;
-  int8_t espTemperatureC;
-  uint8_t satellites;
-  uint8_t hdopTenths;
-  uint16_t statusFlags;
-};
-
-constexpr uint8_t kSync[16] = {0, 3, 1, 2, 3, 0, 2, 1,
-                               1, 2, 0, 3, 2, 1, 3, 0};
-constexpr size_t kPayloadBytes = 32;
 
 bool upperAlpha(char value) { return value >= 'A' && value <= 'Z'; }
 bool digit(char value) { return value >= '0' && value <= '9'; }
@@ -100,95 +90,13 @@ void waitUntil(int64_t deadlineUs) {
   }
 }
 
-void put16(uint8_t*& output, uint16_t value) {
-  *output++ = static_cast<uint8_t>(value >> 8);
-  *output++ = static_cast<uint8_t>(value);
-}
-
-void put32(uint8_t*& output, uint32_t value) {
-  *output++ = static_cast<uint8_t>(value >> 24);
-  *output++ = static_cast<uint8_t>(value >> 16);
-  *output++ = static_cast<uint8_t>(value >> 8);
-  *output++ = static_cast<uint8_t>(value);
-}
-
-uint16_t saturate16(uint32_t value) {
-  return value > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(value);
-}
-
-uint16_t crc16(const uint8_t* data, size_t length) {
-  uint16_t crc = 0xFFFF;
-  while (length--) {
-    crc ^= static_cast<uint16_t>(*data++) << 8;
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x8000U) ? static_cast<uint16_t>((crc << 1) ^ 0x1021U)
-                            : static_cast<uint16_t>(crc << 1);
-    }
-  }
-  return crc;
-}
-
-uint8_t* beginPayload(uint8_t payload[kPayloadBytes], uint8_t type,
-                      uint16_t sequence, uint32_t unixTime) {
-  memset(payload, 0, kPayloadBytes);
-  uint8_t* output = payload;
-  *output++ = 'H';
-  *output++ = 'T';
-  *output++ = 1;
-  *output++ = type;
-  put16(output, sequence);
-  put32(output, unixTime);
-  return output;
-}
-
-void payloadToSymbols(uint8_t payload[kPayloadBytes],
-                      uint8_t symbols[kFrameSymbols]) {
-  const uint16_t checksum = crc16(payload, kPayloadBytes - 2);
-  payload[kPayloadBytes - 2] = static_cast<uint8_t>(checksum >> 8);
-  payload[kPayloadBytes - 1] = static_cast<uint8_t>(checksum);
-  memcpy(symbols, kSync, sizeof(kSync));
-  size_t symbol = sizeof(kSync);
-  for (size_t byte = 0; byte < kPayloadBytes; ++byte) {
-    for (int shift = 6; shift >= 0; shift -= 2) {
-      symbols[symbol++] = (payload[byte] >> shift) & 0x03U;
-    }
-  }
-  while (symbol < kFrameSymbols) {
-    symbols[symbol] = kSync[(symbol - sizeof(kSync)) % sizeof(kSync)];
-    ++symbol;
-  }
-}
-
-void encodePosition(const PositionTelemetry& value, uint16_t sequence,
-                    uint8_t symbols[kFrameSymbols]) {
-  uint8_t payload[kPayloadBytes];
-  uint8_t* output = beginPayload(payload, 1, sequence, value.unixTime);
-  put32(output, static_cast<uint32_t>(value.latitudeMicrodegrees));
-  put32(output, static_cast<uint32_t>(value.longitudeMicrodegrees));
-  put16(output, static_cast<uint16_t>(value.altitudeMetres));
-  *output++ = value.storedImages;
-  put16(output, value.remainingPackets);
-  *output++ = static_cast<uint8_t>(value.espTemperatureC);
-  *output++ = value.satellites;
-  *output++ = value.hdopTenths;
-  put16(output, value.statusFlags);
-  payloadToSymbols(payload, symbols);
-}
-
-void encodeDiagnostics(const MissionDiagnostics& value, uint32_t unixTime,
-                       uint16_t sequence,
-                       uint8_t symbols[kFrameSymbols]) {
-  uint8_t payload[kPayloadBytes];
-  uint8_t* output = beginPayload(payload, 2, sequence, unixTime);
-  *output++ = value.lastResetReason;
-  put16(output, saturate16(value.boots));
-  put16(output, saturate16(value.resets));
-  put16(output, saturate16(value.brownouts));
-  put16(output, saturate16(value.watchdogs));
-  put16(output, saturate16(value.failedJoins));
-  put16(output, saturate16(value.storageRepairs));
-  put16(output, saturate16(value.storageFaults));
-  payloadToSymbols(payload, symbols);
+uint8_t compactFaultSummary(uint16_t flags) {
+  return ((flags & helium_jpeg::STATUS_FLAG_CAMERA_ERROR) ? (1U << 0) : 0U) |
+         ((flags & helium_jpeg::STATUS_FLAG_FS_ERROR) ? (1U << 1) : 0U) |
+         ((flags & helium_jpeg::STATUS_FLAG_ENCODE_FAILED) ? (1U << 2) : 0U) |
+         ((flags & helium_jpeg::STATUS_FLAG_UNEXPECTED_REBOOT) ? (1U << 3)
+                                                               : 0U) |
+         ((flags & helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE) ? (1U << 4) : 0U);
 }
 
 bool Transmitter::configValid() const {
@@ -230,12 +138,21 @@ bool Transmitter::due(const UtcTime& utc) const {
 }
 
 Result Transmitter::transmit(const UtcTime& utc) {
+  return transmitMessage(utc, config_.callsign, config_.grid,
+                         config_.powerDbm);
+}
+
+Result Transmitter::transmitMessage(const UtcTime& utc, const char* callsign,
+                                    const char* grid, int8_t powerDbm) {
   if (!ready_) return Result::Si5351NotFound;
   if (!due(utc)) return Result::NotDue;
+  if (callsign == nullptr || grid == nullptr || powerDbm < 0 ||
+      powerDbm > 60) {
+    return Result::InvalidConfig;
+  }
   uint8_t symbols[kFrameSymbols];
   JTEncode encoder;
-  encoder.wspr_encode(config_.callsign, config_.grid, config_.powerDbm,
-                      symbols);
+  encoder.wspr_encode(callsign, grid, powerDbm, symbols);
   return transmitSymbols(symbols, kFrameSymbols);
 }
 
@@ -261,6 +178,7 @@ Result Transmitter::transmitSymbols(const uint8_t* symbols, size_t count) {
       result = Result::SynthesizerError;
       break;
     }
+    if (symbol == 0U) si5351_.output_enable(SI5351_CLK0, 1);
     waitUntil(startedUs +
               static_cast<int64_t>((static_cast<uint64_t>(symbol) + 1U) *
                                    kSymbolNumeratorUs / kSymbolDenominator));
@@ -278,14 +196,17 @@ void Transmitter::stop() {
 
 struct MissionRadio::Impl {
   char grid[5] = {'A', 'A', '0', '0', '\0'};
+  char locator6[7] = {'A', 'A', '0', '0', 'A', 'A', '\0'};
+  telemetry::ChannelDetails channel;
   Config config;
   Transmitter transmitter;
   bool enabled = false;
-  uint16_t sequence = 0;
-  uint8_t framesSinceDiagnostic = 0;
+  uint32_t activeCycle = UINT32_MAX;
+  uint8_t nextSlot = 0;
 
   Impl(BusIdleCallback busIdle, ServiceCallback service)
-      : config{HAB_WSPR_CALLSIGN,
+      : channel(telemetry::channel17m(HAB_WSPR_U4B_CHANNEL)),
+        config{HAB_WSPR_CALLSIGN,
                grid,
                HAB_WSPR_BASE_FREQUENCY_CENTIHZ,
                HAB_WSPR_POWER_DBM,
@@ -295,22 +216,41 @@ struct MissionRadio::Impl {
                HAB_SI5351_REFERENCE_HZ},
         transmitter(config, busIdle, service) {}
 
-  bool updateGrid(float latitude, float longitude) {
-    if (latitude < -90.0f || latitude >= 90.0f || longitude < -180.0f ||
-        longitude >= 180.0f) {
+  bool settingsValid() const {
+    return channel.valid && telemetry::selfTest() &&
+           static_cast<uint64_t>(channel.frequencyHz) * 100ULL ==
+               HAB_WSPR_BASE_FREQUENCY_CENTIHZ &&
+           HAB_U4B_VOLTAGE_CENTIVOLTS >= 300 &&
+           HAB_U4B_VOLTAGE_CENTIVOLTS <= 495;
+  }
+
+  bool updateLocator(float latitude, float longitude) {
+    if (!telemetry::maidenhead6(latitude, longitude, locator6)) {
       return false;
     }
-    longitude += 180.0f;
-    latitude += 90.0f;
-    grid[0] = static_cast<char>('A' + static_cast<int>(longitude / 20.0f));
-    grid[1] = static_cast<char>('A' + static_cast<int>(latitude / 10.0f));
-    grid[2] = static_cast<char>('0' + static_cast<int>(longitude / 2.0f) % 10);
-    grid[3] = static_cast<char>('0' + static_cast<int>(latitude) % 10);
+    memcpy(grid, locator6, 4U);
+    grid[4] = '\0';
+    return true;
+  }
+
+  bool sendEncoded(const MissionData& data, const char* label,
+                   const telemetry::Type1Message& message) {
+    const UtcTime utc = {data.minute, data.second, data.centisecond};
+    if (!transmitter.due(utc)) return false;
+    Serial.printf("U4B %s: %s %s %u at %02u:%02u:%02u UTC\n", label,
+                  message.callsign, message.grid, message.powerDbm, data.hour,
+                  data.minute, data.second);
+    const Result result = transmitter.transmitMessage(
+        utc, message.callsign, message.grid, message.powerDbm);
+    if (result != Result::Ok) {
+      Serial.printf("U4B %s transmission error %u\n", label,
+                    static_cast<unsigned>(result));
+    }
     return true;
   }
 
   bool transmitStandard(const MissionData& data) {
-    if (!enabled || !updateGrid(data.latitude, data.longitude)) return false;
+    if (!enabled || !updateLocator(data.latitude, data.longitude)) return false;
     const UtcTime utc = {data.minute, data.second, data.centisecond};
     if (!transmitter.due(utc)) return false;
     Serial.printf("WSPR %s %s at %02u:%02u:%02u UTC\n", HAB_WSPR_CALLSIGN,
@@ -323,40 +263,50 @@ struct MissionRadio::Impl {
     return true;
   }
 
-  bool transmitTelemetry(const MissionData& data) {
-    if (!enabled || data.second != 2 || data.centisecond > 25) return false;
-    uint8_t symbols[kFrameSymbols];
-    if (++framesSinceDiagnostic >= kDiagnosticTelemetryPeriod) {
-      encodeDiagnostics(missionDiagnostics(), data.unixTime, sequence++, symbols);
-      framesSinceDiagnostic = 0;
-      Serial.println("Custom diagnostic RF frame.");
-    } else {
-      PositionTelemetry position = {};
-      position.unixTime = data.unixTime;
-      position.latitudeMicrodegrees =
-          static_cast<int32_t>(data.latitude * 1000000.0f);
-      position.longitudeMicrodegrees =
-          static_cast<int32_t>(data.longitude * 1000000.0f);
-      position.altitudeMetres = static_cast<int16_t>(constrain(
-          data.altitudeMetres, static_cast<float>(INT16_MIN),
-          static_cast<float>(INT16_MAX)));
-      position.storedImages = data.storedImages;
-      position.remainingPackets = data.remainingImagePackets;
-      position.espTemperatureC =
-          static_cast<int8_t>(constrain(temperatureRead(), -128.0f, 127.0f));
-      position.satellites = data.satellites;
-      position.hdopTenths =
-          static_cast<uint8_t>(constrain(data.hdop * 10.0f, 0.0f, 255.0f));
-      position.statusFlags = data.statusFlags;
-      encodePosition(position, sequence++, symbols);
-      Serial.println("Custom position RF frame.");
+  bool transmitBasic(const MissionData& data) {
+    if (!enabled || !updateLocator(data.latitude, data.longitude)) return false;
+    telemetry::Type1Message message = {};
+    const int32_t temperatureC = static_cast<int32_t>(temperatureRead());
+    if (!telemetry::encodeBasic(
+            channel, locator6, static_cast<int32_t>(data.altitudeMetres),
+            temperatureC, HAB_U4B_VOLTAGE_CENTIVOLTS,
+            static_cast<double>(data.speedKmh) / 1.852, true, message)) {
+      return false;
     }
-    const Result result = transmitter.transmitSymbols(symbols, kFrameSymbols);
-    if (result != Result::Ok) {
-      Serial.printf("Custom RF transmission error %u\n",
-                    static_cast<unsigned>(result));
+    return sendEncoded(data, "basic", message);
+  }
+
+  bool transmitMissionState(const MissionData& data) {
+    if (!enabled) return false;
+    const uint64_t opaque = telemetry::packMissionState(
+        data.storedImages, data.remainingImagePackets, data.satellites,
+        data.hdop, compactFaultSummary(data.statusFlags));
+    telemetry::Type1Message message = {};
+    if (!telemetry::encodeCustom(channel, kMissionStateSlot, opaque,
+                                 message)) {
+      return false;
     }
-    return true;
+    return sendEncoded(data, "CT mission", message);
+  }
+
+  bool transmitDiagnostics(const MissionData& data) {
+    if (!enabled) return false;
+    const MissionDiagnostics diagnostics = missionDiagnostics();
+    const bool sendA = ((data.unixTime / 600UL) & 1U) == 0U;
+    const uint64_t opaque =
+        sendA ? telemetry::packDiagnosticsA(diagnostics.lastResetReason,
+                                            diagnostics.boots,
+                                            diagnostics.resets)
+              : telemetry::packDiagnosticsB(
+                    diagnostics.brownouts, diagnostics.watchdogs,
+                    diagnostics.failedJoins, diagnostics.storageRepairs,
+                    diagnostics.storageFaults);
+    telemetry::Type1Message message = {};
+    if (!telemetry::encodeCustom(channel, kDiagnosticsSlot, opaque, message)) {
+      return false;
+    }
+    return sendEncoded(data, sendA ? "CT diagnostics A" : "CT diagnostics B",
+                       message);
   }
 };
 
@@ -371,8 +321,19 @@ void MissionRadio::begin() {
         "WSPR/custom RF inhibited: authorised calibrated settings absent.");
     return;
   }
+  if (!impl_->settingsValid()) {
+    Serial.println(
+        "WSPR disabled: U4B channel, frequency, voltage sentinel, or codec "
+        "configuration is invalid.");
+    return;
+  }
   const Result result = impl_->transmitter.begin();
   impl_->enabled = result == Result::Ok;
+  if (impl_->enabled) {
+    Serial.printf("U4B channel %u, id %c%c, start minute %u, lane %u.\n",
+                  impl_->channel.number, impl_->channel.id1, impl_->channel.id3,
+                  impl_->channel.startMinute, impl_->channel.lane);
+  }
   if (!impl_->enabled) {
     Serial.printf("WSPR disabled: initialisation error %u\n",
                   static_cast<unsigned>(result));
@@ -383,12 +344,41 @@ bool MissionRadio::transmitIfDue(const MissionData& data,
                                  bool imageTransferMode) {
   if (!impl_->enabled || data.unixTime == 0) return false;
   if (imageTransferMode) {
-    return data.hour % 2U == 0 && data.minute == 0 &&
+    return data.hour % 2U == 0 && data.minute == impl_->channel.startMinute &&
            impl_->transmitStandard(data);
   }
-  const uint8_t minuteInCycle = data.minute % 6U;
-  if (minuteInCycle == 2U) return impl_->transmitStandard(data);
-  if (minuteInCycle == 4U) return impl_->transmitTelemetry(data);
+  const uint8_t minuteInCycle = static_cast<uint8_t>(
+      (data.minute + 10U - impl_->channel.startMinute) % 10U);
+  const uint32_t absoluteMinute = data.unixTime / 60UL;
+  const uint32_t cycle =
+      (absoluteMinute + 10UL - impl_->channel.startMinute) / 10UL;
+  if (minuteInCycle == 0U) {
+    const bool sent = impl_->transmitStandard(data);
+    if (sent) {
+      impl_->activeCycle = cycle;
+      impl_->nextSlot = kBasicSlot;
+    }
+    return sent;
+  }
+  // Do not emit orphan U4B telemetry after a mid-cycle boot or missed frame.
+  if (impl_->activeCycle != cycle) return false;
+  if (minuteInCycle == kBasicSlot * 2U && impl_->nextSlot == kBasicSlot) {
+    const bool sent = impl_->transmitBasic(data);
+    if (sent) impl_->nextSlot = kMissionStateSlot;
+    return sent;
+  }
+  if (minuteInCycle == kMissionStateSlot * 2U) {
+    if (impl_->nextSlot != kMissionStateSlot) return false;
+    const bool sent = impl_->transmitMissionState(data);
+    if (sent) impl_->nextSlot = kDiagnosticsSlot;
+    return sent;
+  }
+  if (minuteInCycle == kDiagnosticsSlot * 2U) {
+    if (impl_->nextSlot != kDiagnosticsSlot) return false;
+    const bool sent = impl_->transmitDiagnostics(data);
+    if (sent) impl_->nextSlot = kDiagnosticsSlot + 1U;
+    return sent;
+  }
   return false;
 }
 

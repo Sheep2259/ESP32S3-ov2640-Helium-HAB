@@ -12,6 +12,7 @@ struct MissionData {
   float latitude;
   float longitude;
   float altitudeMetres;
+  float speedKmh;
   float hdop;
   uint16_t statusFlags;
   uint16_t remainingImagePackets;

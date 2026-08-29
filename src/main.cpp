@@ -209,6 +209,7 @@ wspr::MissionData currentWsprData(uint32_t nowUtc) {
   data.latitude = lat;
   data.longitude = lng;
   data.altitudeMetres = alt;
+  data.speedKmh = speed_kmh;
   data.hdop = hdop;
   data.statusFlags = currentStatusFlags();
   data.remainingImagePackets = image_store::remainingPacketCount();
@@ -228,10 +229,11 @@ void updateImageTransferMode(uint32_t nowUtc) {
     imageModeStartCycle = UINT32_MAX;
   } else if (!imageTransferMode &&
              (!previousNetworkReachable || imageModeStartCycle == UINT32_MAX)) {
-    imageModeStartCycle = nowUtc / 360UL + 1UL;
+    // Change modes only after the current 10-minute U4B sequence completes.
+    imageModeStartCycle = nowUtc / 600UL + 1UL;
   }
   if (reachable && imageModeStartCycle != UINT32_MAX &&
-      nowUtc / 360UL >= imageModeStartCycle) {
+      nowUtc / 600UL >= imageModeStartCycle) {
     imageTransferMode = true;
     imageModeStartCycle = UINT32_MAX;
   }
@@ -249,7 +251,9 @@ bool maybeTransmitScheduledRf(uint32_t nowUtc) {
 }
 
 void maybeCaptureImage(uint32_t nowUtc) {
-  if (littleFsError || gpsError || nowUtc == 0 || minute % 6U >= 2U) return;
+  // The final U4B slot is intentionally silent. Capture there so camera I2C
+  // work cannot make one of the four scheduled WSPR messages miss its slot.
+  if (littleFsError || gpsError || nowUtc == 0 || minute % 10U < 8U) return;
   const uint32_t lastCapture = image_store::lastCaptureUtc();
   if (lastCapture != 0 &&
       (nowUtc < lastCapture ||

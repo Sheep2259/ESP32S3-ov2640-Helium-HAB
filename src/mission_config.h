@@ -12,7 +12,7 @@
 // does not trigger hardware, enable RF, or advance/delete the mission queue.
 // Restore this to 0 after testing because packet dumps can delay the flight loop.
 #ifndef HAB_SERIAL_PACKET_TEST_MODE
-#define HAB_SERIAL_PACKET_TEST_MODE 0
+#define HAB_SERIAL_PACKET_TEST_MODE 1
 #endif
 
 // TEMPORARY CAMERA CONNECTION DIAGNOSTICS. 1 runs a read-only SCCB test once
@@ -35,7 +35,7 @@
 // Zero is deliberately invalid, so authorising WSPR without also supplying a
 // reviewed frequency still leaves this transmitter disabled at startup.
 #ifndef HAB_WSPR_BASE_FREQUENCY_CENTIHZ
-#define HAB_WSPR_BASE_FREQUENCY_CENTIHZ 1810618000ULL
+#define HAB_WSPR_BASE_FREQUENCY_CENTIHZ 1810606000ULL
 #endif
 
 // Power value announced inside a standard WSPR message. This does NOT adjust
@@ -44,6 +44,21 @@
 // radiated power so receiving stations decode the correct report.
 #ifndef HAB_WSPR_POWER_DBM
 #define HAB_WSPR_POWER_DBM 10
+#endif
+
+// Numeric U4B channel used to identify and associate the regular, Basic, and
+// Custom Telemetry WSPR spots. Channel 599 is Q9, starts at minute 0 on 17 m,
+// and uses lane 4 at 18.106180 MHz. Check current channel activity before
+// flight and change both this value and the base frequency when required.
+#ifndef HAB_WSPR_U4B_CHANNEL
+#define HAB_WSPR_U4B_CHANNEL 429
+#endif
+
+// U4B Basic Telemetry requires a voltage field. This board has no voltage
+// monitor, so transmit the bottom-of-range 3.00 V sentinel. It must not be
+// interpreted as a measurement.
+#ifndef HAB_U4B_VOLTAGE_CENTIVOLTS
+#define HAB_U4B_VOLTAGE_CENTIVOLTS 300
 #endif
 
 // Measured Si5351 frequency correction in parts per billion. Leaving this at
@@ -77,7 +92,7 @@ constexpr uint32_t HAB_IMAGE_INTERVAL_SECONDS = 10UL * 60UL;
 // Minimum delay before retrying after an eligible camera capture attempt that
 // did not produce a stored image. Successful captures use the longer interval
 // above instead.
-constexpr uint32_t HAB_CAPTURE_RETRY_MS = 30UL * 60UL * 1000UL;
+constexpr uint32_t HAB_CAPTURE_RETRY_MS = 4UL * 60UL * 1000UL;
 
 // How long a successful OTAA exchange/recent network response is accepted as
 // proof of coverage. When it expires, the saved session is cleared and fresh
