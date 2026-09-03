@@ -35,7 +35,13 @@ class MissionRadio {
   MissionRadio& operator=(const MissionRadio&) = delete;
 
   void begin();
-  bool transmitIfDue(const MissionData& data, bool imageTransferMode);
+  // A fresh GPS snapshot is required to start a sequence. Once its regular
+  // WSPR frame starts, the remaining U4B frames use that snapshot and a
+  // monotonic schedule so temporary GPS loss cannot break the sequence.
+  bool transmitIfDue(const MissionData& data, bool imageTransferMode,
+                     bool gpsFresh);
+  bool sequenceActive() const;
+  bool transmissionFaulted() const;
 
  private:
   struct Impl;

@@ -346,6 +346,7 @@ void serviceLoRaWAN(HeliumRegion region) {
     recordFailedJoin();
     return;
   }
+  recordSuccessfulJoin();
 
   if (!applyRegionalPolicy(*target)) return;
   lorawanReady = true;

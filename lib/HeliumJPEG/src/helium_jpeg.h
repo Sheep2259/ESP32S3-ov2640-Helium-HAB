@@ -93,17 +93,18 @@ struct HeliumTelemetry {
     uint16_t status_flags;   ///< Status bitfield (see STATUS_FLAG_* constants)
 };
 
-// Status flag bits (bit = 1 → problem)
+// Status flag assignments (set bits are latched until the next boot).
 static constexpr uint16_t STATUS_FLAG_GPS_INVALID      = (1 << 0);
 static constexpr uint16_t STATUS_FLAG_CAMERA_ERROR      = (1 << 1);
-static constexpr uint16_t STATUS_FLAG_LOW_BATTERY       = (1 << 2);
-static constexpr uint16_t STATUS_FLAG_TEMP_WARNING      = (1 << 3);
+static constexpr uint16_t STATUS_FLAG_LOW_BATTERY_RESERVED = (1 << 2);
+static constexpr uint16_t STATUS_FLAG_IMAGE_SAVE_FAILED = (1 << 3);
 static constexpr uint16_t STATUS_FLAG_FS_ERROR          = (1 << 4);
 static constexpr uint16_t STATUS_FLAG_ENCODE_FAILED     = (1 << 5);
-static constexpr uint16_t STATUS_FLAG_UNEXPECTED_REBOOT = (1 << 6);
+static constexpr uint16_t STATUS_FLAG_ABNORMAL_RESET     = (1 << 6);
 static constexpr uint16_t STATUS_FLAG_PSRAM_FAULT       = (1 << 7);
-static constexpr uint16_t STATUS_FLAG_SENSOR_BUS_ERROR  = (1 << 8);
+static constexpr uint16_t STATUS_FLAG_SENSOR_BUS_RESERVED  = (1 << 8);
 static constexpr uint16_t STATUS_FLAG_LORA_TX_FAILURE   = (1 << 9);
+static constexpr uint16_t STATUS_FLAG_WSPR_TX_FAILURE   = (1 << 10);
 
 // ─────────────────────────────────────────────────────────────────────
 // MCUBoundary — Internal: recorded position of each MCU in the scan

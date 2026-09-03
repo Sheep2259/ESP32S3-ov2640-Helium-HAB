@@ -23,6 +23,28 @@ PACKET_SIZE = 210
 METADATA_HEADER_SIZE = 8
 DATA_HEADER_SIZE = 7
 MIN_DATA_PACKET_SIZE = DATA_HEADER_SIZE + 1
+STATUS_FLAG_NAMES = {
+    0x0001: "GPS_LOST_AFTER_FIX",
+    0x0002: "CAMERA_ERROR",
+    0x0004: "LOW_BATTERY_RESERVED",
+    0x0008: "IMAGE_SAVE_FAILED",
+    0x0010: "FILESYSTEM_ERROR",
+    0x0020: "ENCODE_FAILED",
+    0x0040: "ABNORMAL_RESET",
+    0x0080: "PSRAM_FAULT",
+    0x0100: "SENSOR_BUS_RESERVED",
+    0x0200: "LORA_TX_FAILURE",
+    0x0400: "WSPR_TX_FAILURE",
+}
+
+
+def decode_status_flags(flags: int) -> list[str]:
+    names = [name for bit, name in STATUS_FLAG_NAMES.items() if flags & bit]
+    known_mask = sum(STATUS_FLAG_NAMES)
+    unknown = flags & ~known_mask
+    if unknown:
+        names.append(f"UNKNOWN_0x{unknown:04X}")
+    return names
 
 
 def crc16_ccitt(data: bytes) -> int:
@@ -102,10 +124,10 @@ class Metadata:
     data_packets: int
     subsampling: int
     quant_tables: list[bytes]
-    telemetry: dict[str, int | float]
+    telemetry: dict[str, object]
 
 
-def parse_telemetry(raw: bytes) -> dict[str, int | float]:
+def parse_telemetry(raw: bytes) -> dict[str, object]:
     latitude, longitude = struct.unpack_from(">ii", raw, 0)
     altitude, speed, heading, vertical_speed = struct.unpack_from(">HHHh", raw, 8)
     hdop, satellites, fix_type = struct.unpack_from(">BBB", raw, 16)
@@ -138,6 +160,7 @@ def parse_telemetry(raw: bytes) -> dict[str, int | float]:
         "capture_ms": capture_ms,
         "free_heap_kb": free_heap_kb,
         "status_flags": status_flags,
+        "status_errors": decode_status_flags(status_flags),
     }
 
 
@@ -489,7 +512,15 @@ def monitor_passively(port: str, baud: int, output_dir: Path) -> None:
                 stamped = f"{int(time.time())} {line}"
                 status_log.write(stamped + "\n")
                 status_log.flush()
-                print(line)
+                flag_field = next(
+                    (field for field in line.split() if field.startswith("flags=0x")),
+                    None,
+                )
+                if flag_field is None:
+                    print(line)
+                else:
+                    errors = decode_status_flags(int(flag_field[6:], 16))
+                    print(f"{line} errors={','.join(errors) if errors else 'none'}")
             else:
                 print(f"[device] {line}")
 

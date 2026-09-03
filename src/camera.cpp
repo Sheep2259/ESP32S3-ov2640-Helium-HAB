@@ -1,6 +1,7 @@
 #include "camera.h"
 
 #include <Wire.h>
+#include <driver/i2c.h>
 #include <pin_defs.h>
 
 namespace camera {
@@ -14,6 +15,20 @@ constexpr uint8_t kOv2640SensorBank = 0x01;
 constexpr uint8_t kOv2640ProductIdRegister = 0x0A;
 constexpr uint8_t kOv2640VersionRegister = 0x0B;
 constexpr uint32_t kSccbFrequencyHz = 100000;
+
+bool prepareSharedSccbBus() {
+  // The Si5351 and camera are wired to the same SDA/SCL pins. Keep I2C0
+  // installed for the lifetime of the application and have esp-camera borrow
+  // it; otherwise esp-camera's private SCCB controller can displace Wire's
+  // GPIO routing when a camera probe succeeds or fails.
+  static bool prepared = false;
+  if (prepared) return true;
+  if (!Wire.begin(I2C_SDA, I2C_SCL, kSccbFrequencyHz)) return false;
+  Wire.setTimeOut(50);
+  if (!Wire.setClock(kSccbFrequencyHz)) return false;
+  prepared = true;
+  return true;
+}
 
 void startDiagnosticXclk(uint32_t frequencyHz) {
   ledcSetup(LEDC_CHANNEL_0, frequencyHz, 1);
@@ -155,6 +170,8 @@ void runConnectionDiagnostics() {
 }
 
 esp_err_t begin() {
+  if (!prepareSharedSccbBus()) return ESP_FAIL;
+
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -170,8 +187,12 @@ esp_err_t begin() {
   config.pin_pclk = CAM_PCLK;
   config.pin_vsync = CAM_VSYNC;
   config.pin_href = CAM_HREF;
-  config.pin_sccb_sda = CAM_SDA;
-  config.pin_sccb_scl = CAM_SCL;
+  // Borrow Arduino Wire's existing I2C0 controller. With -1 pins the camera
+  // driver neither installs nor removes an SCCB controller, so a failed or
+  // successful camera attempt cannot break the Si5351 bus configuration.
+  config.pin_sccb_sda = -1;
+  config.pin_sccb_scl = -1;
+  config.sccb_i2c_port = static_cast<int>(I2C_NUM_0);
   config.pin_pwdn = CAM_PWDN;
   config.pin_reset = CAM_RESET;
   config.xclk_freq_hz = 20000000;

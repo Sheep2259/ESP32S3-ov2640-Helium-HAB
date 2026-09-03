@@ -22,8 +22,9 @@ constexpr int CAM_SDA = 4;
 constexpr int CAM_SCL = 5;
 constexpr int CAM_LDO_EN = 36;
 
-// Camera SCCB and Si5351 share this I2C bus.  Only access the Si5351 while
-// the camera is idle; the camera driver owns SCCB transactions during capture.
+// Camera SCCB and Si5351 share Arduino Wire/I2C0. Only access the Si5351 while
+// the camera is idle; esp-camera borrows this controller during capture and
+// must not install or remove a private SCCB controller on these pins.
 constexpr int I2C_SDA = CAM_SDA;
 constexpr int I2C_SCL = CAM_SCL;
 

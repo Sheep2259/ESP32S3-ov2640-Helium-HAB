@@ -58,13 +58,16 @@ uint64_t packMissionState(uint8_t storedImages, uint16_t remainingPackets,
                           uint8_t satellites, float hdop,
                           uint8_t faultSummary);
 
-// Slot 3 diagnostics A, extracted with radices 16, 32768, 32768.
+// Slot 3 diagnostics A: reset reason, boots, and short solar boots, extracted
+// with radices 16, 32768, 32768.
 uint64_t packDiagnosticsA(uint8_t lastResetReason, uint32_t boots,
-                          uint32_t resets);
+                          uint32_t shortBoots);
 
-// Slot 3 diagnostics B, extracted with five consecutive radix-128 fields.
+// Slot 3 diagnostics B: brownouts, watchdogs, consecutive failed joins, WSPR
+// failures, and storage faults, extracted with five radix-128 fields.
 uint64_t packDiagnosticsB(uint32_t brownouts, uint32_t watchdogs,
-                          uint32_t failedJoins, uint32_t storageRepairs,
+                          uint32_t consecutiveFailedJoins,
+                          uint32_t wsprFailures,
                           uint32_t storageFaults);
 
 // Known-answer and boundary checks used to inhibit RF if the codec is broken.

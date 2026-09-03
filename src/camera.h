@@ -12,7 +12,8 @@ void powerOn();
 // SCCB communication at the supplied XCLK frequencies, then leaves it off.
 void runConnectionDiagnostics();
 
-// Starts the ESP32 camera driver after powerOn().
+// Starts the ESP32 camera driver after powerOn(). The driver borrows the
+// persistent Wire/I2C0 controller shared with the Si5351.
 esp_err_t begin();
 
 // Returns a JPEG framebuffer owned by the camera driver, or nullptr.

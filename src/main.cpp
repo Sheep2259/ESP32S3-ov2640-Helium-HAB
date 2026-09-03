@@ -39,17 +39,15 @@ uint8_t sats = 0;
 
 bool littleFsError = false;
 bool gpsError = true;
-bool encoderError = false;
-bool cameraCaptureError = false;
-bool cameraInitError = false;
+bool gpsWasFresh = false;
 bool cameraCaptureInProgress = false;
-bool loraTxError = false;
 bool watchdogReady = false;
 bool imageTransferMode = false;
 bool previousNetworkReachable = false;
 uint32_t imageModeStartCycle = UINT32_MAX;
 bool captureAttempted = false;
 unsigned long lastCaptureAttemptMs = 0;
+uint16_t latchedStatusFlags = 0;
 
 helium_jpeg::HeliumJPEG imageEncoder;
 int activeImageSlot = -1;
@@ -61,6 +59,8 @@ void feedWatchdog() {
 
 wspr::MissionRadio wsprRadio(
     []() { return !cameraCaptureInProgress; }, feedWatchdog);
+
+void latchStatusFlag(uint16_t flag) { latchedStatusFlags |= flag; }
 
 void updateGps() {
   while (Serial2.available()) {
@@ -82,7 +82,15 @@ void updateGps() {
     }
   }
   if (gps.location.isValid()) age_s = gps.location.age() / 1000.0f;
-  gpsError = !GPSPositionFresh();
+  const bool positionFresh = GPSPositionFresh();
+  if (positionFresh) {
+    gpsWasFresh = true;
+  } else if (gpsWasFresh) {
+    // Initial acquisition is a normal state. Losing a fix after acquisition is
+    // a flight fault and remains reported until power is removed.
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_GPS_INVALID);
+  }
+  gpsError = !positionFresh;
   if (gpsError) {
     GEOFENCE_inhibit();
   } else {
@@ -113,16 +121,17 @@ uint32_t gpsUnixTime() {
 
 uint16_t currentStatusFlags() {
   const MissionDiagnostics diagnostics = missionDiagnostics();
-  return (gpsError ? helium_jpeg::STATUS_FLAG_GPS_INVALID : 0) |
-         (littleFsError ? helium_jpeg::STATUS_FLAG_FS_ERROR : 0) |
-         ((cameraInitError || cameraCaptureError)
-              ? helium_jpeg::STATUS_FLAG_CAMERA_ERROR
-              : 0) |
-         (encoderError ? helium_jpeg::STATUS_FLAG_ENCODE_FAILED : 0) |
-         (loraTxError ? helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE : 0) |
-         ((diagnostics.resets != 0)
-              ? helium_jpeg::STATUS_FLAG_UNEXPECTED_REBOOT
-              : 0);
+  uint16_t flags = latchedStatusFlags;
+  if (littleFsError || diagnostics.storageFaultThisBoot) {
+    flags |= helium_jpeg::STATUS_FLAG_FS_ERROR;
+  }
+  if (diagnostics.abnormalReset) {
+    flags |= helium_jpeg::STATUS_FLAG_ABNORMAL_RESET;
+  }
+  if (wsprRadio.transmissionFaulted()) {
+    flags |= helium_jpeg::STATUS_FLAG_WSPR_TX_FAILURE;
+  }
+  return flags;
 }
 
 helium_jpeg::HeliumTelemetry captureTelemetry() {
@@ -155,23 +164,33 @@ bool prepareImageEncoder(int slot) {
   return true;
 }
 
-bool transmitNextImagePacket() {
+enum class ImagePacketTxResult : uint8_t {
+  Sent,
+  EncodeFailed,
+  RadioFailed,
+};
+
+ImagePacketTxResult transmitNextImagePacket() {
   const int slot = imageEncoderReady ? activeImageSlot
                                      : image_store::oldestImage();
-  if (slot < 0 || !prepareImageEncoder(slot)) return false;
+  if (slot < 0 || !prepareImageEncoder(slot)) {
+    return ImagePacketTxResult::EncodeFailed;
+  }
   helium_jpeg::HeliumPacket packet;
-  if (!imageEncoder.getNextPacket(packet)) return false;
+  if (!imageEncoder.getNextPacket(packet)) {
+    return ImagePacketTxResult::EncodeFailed;
+  }
   serial_packet_test::mirrorLoRaPacket(packet.data, packet.length);
   if (!transmitHelium(packet.data, packet.length)) {
     imageEncoderReady = false;
     activeImageSlot = -1;
-    return false;
+    return ImagePacketTxResult::RadioFailed;
   }
   if (image_store::packetSent(slot)) {
     imageEncoderReady = false;
     activeImageSlot = -1;
   }
-  return true;
+  return ImagePacketTxResult::Sent;
 }
 
 void captureImage() {
@@ -185,22 +204,30 @@ void captureImage() {
   cameraCaptureInProgress = true;
   const unsigned long captureStarted = millis();
   camera::powerOn();
-  cameraInitError = camera::begin() != ESP_OK;
+  const bool cameraInitError = camera::begin() != ESP_OK;
   camera_fb_t* frame = cameraInitError ? nullptr : camera::captureJpeg();
+  bool imageStored = false;
   if (frame == nullptr) {
-    cameraCaptureError = true;
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_CAMERA_ERROR);
+  } else if (!camera::validJpeg(frame->buf, frame->len)) {
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_CAMERA_ERROR);
+    camera::release(frame);
   } else {
     helium_jpeg::HeliumTelemetry telemetry = captureTelemetry();
     telemetry.capture_ms = static_cast<uint16_t>(
         min(static_cast<unsigned long>(UINT16_MAX), millis() - captureStarted));
-    cameraCaptureError = image_store::save(*frame, telemetry) != ESP_OK;
-    if (!cameraCaptureError) serial_packet_test::imageStored();
+    imageStored = image_store::save(*frame, telemetry) == ESP_OK;
+    if (imageStored) {
+      serial_packet_test::imageStored();
+    } else {
+      latchStatusFlag(helium_jpeg::STATUS_FLAG_IMAGE_SAVE_FAILED);
+    }
     camera::release(frame);
   }
   camera::powerOff();
   cameraCaptureInProgress = false;
-  Serial.println(cameraCaptureError ? "[camera] Capture failed."
-                                    : "[camera] Image stored.");
+  Serial.println(imageStored ? "[camera] Image stored."
+                             : "[camera] Capture/store failed.");
 }
 
 wspr::MissionData currentWsprData(uint32_t nowUtc) {
@@ -241,8 +268,9 @@ void updateImageTransferMode(uint32_t nowUtc) {
 }
 
 bool maybeTransmitScheduledRf(uint32_t nowUtc) {
-  if (gpsError || !GPSTimeFresh()) return false;
-  if (!wsprRadio.transmitIfDue(currentWsprData(nowUtc), imageTransferMode)) {
+  const bool gpsFresh = !gpsError && GPSTimeFresh();
+  if (!wsprRadio.transmitIfDue(currentWsprData(nowUtc), imageTransferMode,
+                               gpsFresh)) {
     return false;
   }
   gpsError = true;
@@ -275,12 +303,11 @@ void maybeTransmitImagePacket() {
       image_store::oldestImage() < 0) {
     return;
   }
-  if (transmitNextImagePacket()) {
-    encoderError = false;
-    loraTxError = false;
-  } else {
-    encoderError = true;
-    loraTxError = true;
+  const ImagePacketTxResult result = transmitNextImagePacket();
+  if (result == ImagePacketTxResult::EncodeFailed) {
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_ENCODE_FAILED);
+  } else if (result == ImagePacketTxResult::RadioFailed) {
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE);
   }
 }
 }  // namespace
@@ -292,7 +319,14 @@ void setup() {
   Serial.begin(115200);
   delay(HAB_STARTUP_DELAY_MS);
   Serial.println("[boot] HAB firmware starting.");
-  initialiseMissionDiagnostics();
+  if (!initialiseMissionDiagnostics()) {
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_FS_ERROR);
+    Serial.println("[diagnostics] Persistent storage unavailable.");
+  }
+  if (!psramFound()) {
+    latchStatusFlag(helium_jpeg::STATUS_FLAG_PSRAM_FAULT);
+    Serial.println("[memory] PSRAM unavailable.");
+  }
   if (esp_task_wdt_init(HAB_WATCHDOG_TIMEOUT_SECONDS, true) == ESP_OK &&
       esp_task_wdt_add(nullptr) == ESP_OK) {
     watchdogReady = true;
@@ -319,6 +353,7 @@ void setup() {
 
 void loop() {
   feedWatchdog();
+  serviceMissionDiagnostics(millis() / 1000UL);
   updateGps();
   const uint32_t nowUtc = gpsUnixTime();
   updateImageTransferMode(nowUtc);
@@ -326,10 +361,15 @@ void loop() {
     delay(5);
     return;
   }
-  serviceLoRaWAN(GEOFENCE_region);
-  updateImageTransferMode(nowUtc);
-  maybeCaptureImage(nowUtc);
-  maybeTransmitImagePacket();
+  // OTAA joins and receive windows can block long enough to miss the next
+  // two-minute WSPR boundary. Defer LoRaWAN work while a snapshotted U4B
+  // sequence is in progress; GPS parsing above continues during each gap.
+  if (!wsprRadio.sequenceActive()) {
+    serviceLoRaWAN(GEOFENCE_region);
+    updateImageTransferMode(nowUtc);
+    maybeCaptureImage(nowUtc);
+    maybeTransmitImagePacket();
+  }
   const serial_packet_test::FlightStatus serialStatus = {
       millis() / 1000UL,
       nowUtc,

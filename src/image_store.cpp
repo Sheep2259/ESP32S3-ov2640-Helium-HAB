@@ -319,13 +319,14 @@ bool begin() {
     }
   }
   if (!mounted) {
+    // Count one failed mount episode, rather than each bounded retry.
+    recordStorageFault();
     Serial.println(
         "LittleFS mount failed after bounded retries; formatting filesystem.");
     if (!LittleFS.format() ||
         !LittleFS.begin(false, kLittleFsBasePath, kLittleFsMaxOpenFiles,
                         kLittleFsPartitionLabel)) {
       LittleFS.end();
-      recordStorageFault();
       Serial.println("LittleFS format/recovery failed; storage unavailable.");
       return false;
     }
@@ -492,11 +493,15 @@ esp_err_t save(const camera_fb_t& frame,
   imageFilename(imageId, jpegName, sizeof(jpegName));
   telemetryFilename(imageId, telemetryName, sizeof(telemetryName));
   File jpeg = LittleFS.open(jpegName, FILE_WRITE);
-  if (!jpeg) return ESP_FAIL;
+  if (!jpeg) {
+    recordStorageFault();
+    return ESP_FAIL;
+  }
   const size_t written = jpeg.write(frame.buf, frame.len);
   jpeg.close();
   if (written != frame.len || !validJpegFile(jpegName)) {
     LittleFS.remove(jpegName);
+    recordStorageFault();
     return ESP_FAIL;
   }
 
@@ -504,6 +509,7 @@ esp_err_t save(const camera_fb_t& frame,
   File telemetryFile = LittleFS.open(telemetryName, FILE_WRITE);
   if (!telemetryFile) {
     removeFiles(imageId);
+    recordStorageFault();
     return ESP_FAIL;
   }
   const size_t telemetryWritten = telemetryFile.write(
@@ -511,6 +517,7 @@ esp_err_t save(const camera_fb_t& frame,
   telemetryFile.close();
   if (telemetryWritten != sizeof(telemetry)) {
     removeFiles(imageId);
+    recordStorageFault();
     return ESP_FAIL;
   }
 

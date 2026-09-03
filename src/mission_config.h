@@ -28,7 +28,7 @@
 // 1: allow Si5351 initialisation and scheduled RF frames, but only when the
 // frequency below is valid and fresh GPS position/time are available.
 #ifndef HAB_WSPR_AUTHORISED
-#define HAB_WSPR_AUTHORISED 0
+#define HAB_WSPR_AUTHORISED 1
 #endif
 
 // Lowest WSPR tone in 0.01 Hz units; the other tones are up to 4.38 Hz higher.
@@ -102,6 +102,10 @@ constexpr uint32_t HAB_NETWORK_EVIDENCE_TIMEOUT_MS = 2UL * 60UL * 60UL * 1000UL;
 // Reset the ESP32 if the main task goes this many seconds without servicing the
 // watchdog. The reset is recorded in persistent mission diagnostics.
 constexpr uint32_t HAB_WATCHDOG_TIMEOUT_SECONDS = 180UL;
+
+// A boot that loses power before this uptime is counted as a short solar boot.
+// The healthy marker is written only once per boot to limit NVS wear.
+constexpr uint32_t HAB_HEALTHY_BOOT_SECONDS = 10UL * 60UL;
 
 // Quiet time after UART0 starts and before any diagnostics or mission hardware
 // initialisation. This gives a PC serial monitor time to open after reset.

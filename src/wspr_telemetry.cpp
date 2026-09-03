@@ -240,19 +240,20 @@ uint64_t packMissionState(uint8_t storedImages, uint16_t remainingPackets,
 }
 
 uint64_t packDiagnosticsA(uint8_t lastResetReason, uint32_t boots,
-                          uint32_t resets) {
-  uint64_t value = saturate(resets, 32767U);
+                          uint32_t shortBoots) {
+  uint64_t value = saturate(shortBoots, 32767U);
   value = value * 32768ULL + saturate(boots, 32767U);
   value = value * 16ULL + (lastResetReason & 0x0FU);
   return value;
 }
 
 uint64_t packDiagnosticsB(uint32_t brownouts, uint32_t watchdogs,
-                          uint32_t failedJoins, uint32_t storageRepairs,
+                          uint32_t consecutiveFailedJoins,
+                          uint32_t wsprFailures,
                           uint32_t storageFaults) {
   uint64_t value = saturate(storageFaults, 127U);
-  value = value * 128ULL + saturate(storageRepairs, 127U);
-  value = value * 128ULL + saturate(failedJoins, 127U);
+  value = value * 128ULL + saturate(wsprFailures, 127U);
+  value = value * 128ULL + saturate(consecutiveFailedJoins, 127U);
   value = value * 128ULL + saturate(watchdogs, 127U);
   value = value * 128ULL + saturate(brownouts, 127U);
   return value;

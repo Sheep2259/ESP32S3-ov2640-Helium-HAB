@@ -23,6 +23,9 @@ constexpr uint32_t kSymbolDenominator = 12000;
 constexpr uint8_t kBasicSlot = 1;
 constexpr uint8_t kMissionStateSlot = 2;
 constexpr uint8_t kDiagnosticsSlot = 3;
+constexpr uint8_t kCycleFrameCount = 4;
+constexpr int64_t kSlotIntervalUs = 120LL * 1000000LL;
+constexpr int64_t kStartWindowUs = 250000LL;
 
 struct UtcTime {
   uint8_t minute;
@@ -91,12 +94,21 @@ void waitUntil(int64_t deadlineUs) {
 }
 
 uint8_t compactFaultSummary(uint16_t flags) {
-  return ((flags & helium_jpeg::STATUS_FLAG_CAMERA_ERROR) ? (1U << 0) : 0U) |
-         ((flags & helium_jpeg::STATUS_FLAG_FS_ERROR) ? (1U << 1) : 0U) |
+  return ((flags & (helium_jpeg::STATUS_FLAG_CAMERA_ERROR |
+                    helium_jpeg::STATUS_FLAG_PSRAM_FAULT))
+              ? (1U << 0)
+              : 0U) |
+         ((flags & (helium_jpeg::STATUS_FLAG_FS_ERROR |
+                    helium_jpeg::STATUS_FLAG_IMAGE_SAVE_FAILED))
+              ? (1U << 1)
+              : 0U) |
          ((flags & helium_jpeg::STATUS_FLAG_ENCODE_FAILED) ? (1U << 2) : 0U) |
-         ((flags & helium_jpeg::STATUS_FLAG_UNEXPECTED_REBOOT) ? (1U << 3)
-                                                               : 0U) |
-         ((flags & helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE) ? (1U << 4) : 0U);
+         ((flags & helium_jpeg::STATUS_FLAG_ABNORMAL_RESET) ? (1U << 3)
+                                                            : 0U) |
+         ((flags & (helium_jpeg::STATUS_FLAG_LORA_TX_FAILURE |
+                    helium_jpeg::STATUS_FLAG_WSPR_TX_FAILURE))
+              ? (1U << 4)
+              : 0U);
 }
 
 bool Transmitter::configValid() const {
@@ -124,7 +136,7 @@ Result Transmitter::begin() {
                     config_.correctionPpb)) {
     return Result::Si5351NotFound;
   }
-  si5351_.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
+  si5351_.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
   si5351_.set_clock_disable(SI5351_CLK0, SI5351_CLK_DISABLE_LOW);
   si5351_.output_enable(SI5351_CLK0, 0);
   ready_ = true;
@@ -201,7 +213,15 @@ struct MissionRadio::Impl {
   Config config;
   Transmitter transmitter;
   bool enabled = false;
-  uint32_t activeCycle = UINT32_MAX;
+  MissionData cycleData = {};
+  telemetry::Type1Message basicMessage = {};
+  telemetry::Type1Message missionMessage = {};
+  telemetry::Type1Message diagnosticsMessage = {};
+  uint8_t cycleSymbols[kCycleFrameCount][kFrameSymbols] = {};
+  int64_t cycleStartUs = 0;
+  bool cycleActive = false;
+  bool diagnosticsA = false;
+  bool transmissionFaulted = false;
   uint8_t nextSlot = 0;
 
   Impl(BusIdleCallback busIdle, ServiceCallback service)
@@ -233,20 +253,149 @@ struct MissionRadio::Impl {
     return true;
   }
 
-  bool sendEncoded(const MissionData& data, const char* label,
-                   const telemetry::Type1Message& message) {
-    const UtcTime utc = {data.minute, data.second, data.centisecond};
-    if (!transmitter.due(utc)) return false;
-    Serial.printf("U4B %s: %s %s %u at %02u:%02u:%02u UTC\n", label,
-                  message.callsign, message.grid, message.powerDbm, data.hour,
-                  data.minute, data.second);
-    const Result result = transmitter.transmitMessage(
-        utc, message.callsign, message.grid, message.powerDbm);
+  void encodeSymbols(const char* callsign, const char* messageGrid,
+                     uint8_t powerDbm, uint8_t* symbols) {
+    JTEncode encoder;
+    encoder.wspr_encode(callsign, messageGrid, powerDbm, symbols);
+  }
+
+  bool prepareCycle(const MissionData& data) {
+    if (!updateLocator(data.latitude, data.longitude)) return false;
+
+    cycleData = data;
+    const int32_t temperatureC = static_cast<int32_t>(temperatureRead());
+    if (!telemetry::encodeBasic(
+            channel, locator6, static_cast<int32_t>(cycleData.altitudeMetres),
+            temperatureC, HAB_U4B_VOLTAGE_CENTIVOLTS,
+            static_cast<double>(cycleData.speedKmh) / 1.852, true,
+            basicMessage)) {
+      return false;
+    }
+
+    const uint64_t missionOpaque = telemetry::packMissionState(
+        cycleData.storedImages, cycleData.remainingImagePackets,
+        cycleData.satellites, cycleData.hdop,
+        compactFaultSummary(cycleData.statusFlags));
+    if (!telemetry::encodeCustom(channel, kMissionStateSlot, missionOpaque,
+                                 missionMessage)) {
+      return false;
+    }
+
+    const MissionDiagnostics diagnostics = missionDiagnostics();
+    diagnosticsA = ((cycleData.unixTime / 600UL) & 1U) == 0U;
+    const uint64_t diagnosticsOpaque =
+        diagnosticsA
+            ? telemetry::packDiagnosticsA(diagnostics.lastResetReason,
+                                          diagnostics.boots,
+                                          diagnostics.shortBoots)
+            : telemetry::packDiagnosticsB(
+                  diagnostics.brownouts, diagnostics.watchdogs,
+                  diagnostics.consecutiveFailedJoins,
+                  diagnostics.wsprFailures,
+                  diagnostics.storageFaults);
+    if (!telemetry::encodeCustom(channel, kDiagnosticsSlot,
+                                 diagnosticsOpaque, diagnosticsMessage)) {
+      return false;
+    }
+
+    encodeSymbols(HAB_WSPR_CALLSIGN, grid, HAB_WSPR_POWER_DBM,
+                  cycleSymbols[0]);
+    encodeSymbols(basicMessage.callsign, basicMessage.grid,
+                  basicMessage.powerDbm, cycleSymbols[kBasicSlot]);
+    encodeSymbols(missionMessage.callsign, missionMessage.grid,
+                  missionMessage.powerDbm,
+                  cycleSymbols[kMissionStateSlot]);
+    encodeSymbols(diagnosticsMessage.callsign, diagnosticsMessage.grid,
+                  diagnosticsMessage.powerDbm,
+                  cycleSymbols[kDiagnosticsSlot]);
+    return true;
+  }
+
+  void scheduledTime(uint8_t slot, uint8_t& scheduledHour,
+                     uint8_t& scheduledMinute) const {
+    const uint8_t minuteWithCarry =
+        static_cast<uint8_t>(cycleData.minute + slot * 2U);
+    scheduledMinute = minuteWithCarry % 60U;
+    scheduledHour =
+        static_cast<uint8_t>((cycleData.hour + minuteWithCarry / 60U) % 24U);
+  }
+
+  bool sendPrepared(uint8_t slot, const char* label, const char* callsign,
+                    const char* messageGrid, uint8_t powerDbm) {
+    uint8_t scheduledHour = 0;
+    uint8_t scheduledMinute = 0;
+    scheduledTime(slot, scheduledHour, scheduledMinute);
+    if (slot == 0U) {
+      Serial.printf("WSPR %s %s at %02u:%02u:02 UTC\n", callsign,
+                    messageGrid, scheduledHour, scheduledMinute);
+    } else {
+      Serial.printf("U4B %s: %s %s %u at %02u:%02u:02 UTC\n", label,
+                    callsign, messageGrid, powerDbm, scheduledHour,
+                    scheduledMinute);
+    }
+
+    if (slot == 0U) cycleStartUs = esp_timer_get_time();
+    const Result result =
+        transmitter.transmitSymbols(cycleSymbols[slot], kFrameSymbols);
     if (result != Result::Ok) {
+      transmissionFaulted = true;
+      recordWsprFailure();
       Serial.printf("U4B %s transmission error %u\n", label,
                     static_cast<unsigned>(result));
     }
     return true;
+  }
+
+  bool startCycle(const MissionData& data) {
+    if (!prepareCycle(data)) {
+      transmissionFaulted = true;
+      recordWsprFailure();
+      Serial.println("U4B cycle not started: snapshot encoding failed.");
+      return false;
+    }
+    cycleActive = true;
+    nextSlot = kBasicSlot;
+    return sendPrepared(0U, "regular", HAB_WSPR_CALLSIGN, grid,
+                        HAB_WSPR_POWER_DBM);
+  }
+
+  bool transmitCycleSlotIfDue() {
+    if (!cycleActive || nextSlot > kDiagnosticsSlot) return false;
+    const int64_t deadlineUs =
+        cycleStartUs + static_cast<int64_t>(nextSlot) * kSlotIntervalUs;
+    const int64_t nowUs = esp_timer_get_time();
+    if (nowUs < deadlineUs) return false;
+    if (nowUs > deadlineUs + kStartWindowUs) {
+      transmissionFaulted = true;
+      recordWsprFailure();
+      Serial.printf("U4B cycle aborted: snapshot slot %u start was missed.\n",
+                    nextSlot);
+      cycleActive = false;
+      nextSlot = 0;
+      return false;
+    }
+
+    const uint8_t slot = nextSlot++;
+    bool sent = false;
+    if (slot == kBasicSlot) {
+      sent = sendPrepared(slot, "basic", basicMessage.callsign,
+                          basicMessage.grid, basicMessage.powerDbm);
+    } else if (slot == kMissionStateSlot) {
+      sent = sendPrepared(slot, "CT mission", missionMessage.callsign,
+                          missionMessage.grid, missionMessage.powerDbm);
+    } else {
+      sent = sendPrepared(slot,
+                          diagnosticsA ? "CT diagnostics A"
+                                       : "CT diagnostics B",
+                          diagnosticsMessage.callsign,
+                          diagnosticsMessage.grid,
+                          diagnosticsMessage.powerDbm);
+    }
+    if (slot == kDiagnosticsSlot) {
+      cycleActive = false;
+      nextSlot = 0;
+    }
+    return sent;
   }
 
   bool transmitStandard(const MissionData& data) {
@@ -257,56 +406,12 @@ struct MissionRadio::Impl {
                   grid, data.hour, data.minute, data.second);
     const Result result = transmitter.transmit(utc);
     if (result != Result::Ok) {
+      transmissionFaulted = true;
+      recordWsprFailure();
       Serial.printf("WSPR transmission error %u\n",
                     static_cast<unsigned>(result));
     }
     return true;
-  }
-
-  bool transmitBasic(const MissionData& data) {
-    if (!enabled || !updateLocator(data.latitude, data.longitude)) return false;
-    telemetry::Type1Message message = {};
-    const int32_t temperatureC = static_cast<int32_t>(temperatureRead());
-    if (!telemetry::encodeBasic(
-            channel, locator6, static_cast<int32_t>(data.altitudeMetres),
-            temperatureC, HAB_U4B_VOLTAGE_CENTIVOLTS,
-            static_cast<double>(data.speedKmh) / 1.852, true, message)) {
-      return false;
-    }
-    return sendEncoded(data, "basic", message);
-  }
-
-  bool transmitMissionState(const MissionData& data) {
-    if (!enabled) return false;
-    const uint64_t opaque = telemetry::packMissionState(
-        data.storedImages, data.remainingImagePackets, data.satellites,
-        data.hdop, compactFaultSummary(data.statusFlags));
-    telemetry::Type1Message message = {};
-    if (!telemetry::encodeCustom(channel, kMissionStateSlot, opaque,
-                                 message)) {
-      return false;
-    }
-    return sendEncoded(data, "CT mission", message);
-  }
-
-  bool transmitDiagnostics(const MissionData& data) {
-    if (!enabled) return false;
-    const MissionDiagnostics diagnostics = missionDiagnostics();
-    const bool sendA = ((data.unixTime / 600UL) & 1U) == 0U;
-    const uint64_t opaque =
-        sendA ? telemetry::packDiagnosticsA(diagnostics.lastResetReason,
-                                            diagnostics.boots,
-                                            diagnostics.resets)
-              : telemetry::packDiagnosticsB(
-                    diagnostics.brownouts, diagnostics.watchdogs,
-                    diagnostics.failedJoins, diagnostics.storageRepairs,
-                    diagnostics.storageFaults);
-    telemetry::Type1Message message = {};
-    if (!telemetry::encodeCustom(channel, kDiagnosticsSlot, opaque, message)) {
-      return false;
-    }
-    return sendEncoded(data, sendA ? "CT diagnostics A" : "CT diagnostics B",
-                       message);
   }
 };
 
@@ -335,51 +440,37 @@ void MissionRadio::begin() {
                   impl_->channel.startMinute, impl_->channel.lane);
   }
   if (!impl_->enabled) {
+    impl_->transmissionFaulted = true;
+    recordWsprFailure();
     Serial.printf("WSPR disabled: initialisation error %u\n",
                   static_cast<unsigned>(result));
   }
 }
 
 bool MissionRadio::transmitIfDue(const MissionData& data,
-                                 bool imageTransferMode) {
-  if (!impl_->enabled || data.unixTime == 0) return false;
+                                 bool imageTransferMode, bool gpsFresh) {
+  if (!impl_->enabled) return false;
+  if (impl_->cycleActive) return impl_->transmitCycleSlotIfDue();
+  if (!gpsFresh || data.unixTime == 0) return false;
   if (imageTransferMode) {
     return data.hour % 2U == 0 && data.minute == impl_->channel.startMinute &&
            impl_->transmitStandard(data);
   }
   const uint8_t minuteInCycle = static_cast<uint8_t>(
       (data.minute + 10U - impl_->channel.startMinute) % 10U);
-  const uint32_t absoluteMinute = data.unixTime / 60UL;
-  const uint32_t cycle =
-      (absoluteMinute + 10UL - impl_->channel.startMinute) / 10UL;
   if (minuteInCycle == 0U) {
-    const bool sent = impl_->transmitStandard(data);
-    if (sent) {
-      impl_->activeCycle = cycle;
-      impl_->nextSlot = kBasicSlot;
-    }
-    return sent;
+    const UtcTime utc = {data.minute, data.second, data.centisecond};
+    if (!impl_->transmitter.due(utc)) return false;
+    return impl_->startCycle(data);
   }
-  // Do not emit orphan U4B telemetry after a mid-cycle boot or missed frame.
-  if (impl_->activeCycle != cycle) return false;
-  if (minuteInCycle == kBasicSlot * 2U && impl_->nextSlot == kBasicSlot) {
-    const bool sent = impl_->transmitBasic(data);
-    if (sent) impl_->nextSlot = kMissionStateSlot;
-    return sent;
-  }
-  if (minuteInCycle == kMissionStateSlot * 2U) {
-    if (impl_->nextSlot != kMissionStateSlot) return false;
-    const bool sent = impl_->transmitMissionState(data);
-    if (sent) impl_->nextSlot = kDiagnosticsSlot;
-    return sent;
-  }
-  if (minuteInCycle == kDiagnosticsSlot * 2U) {
-    if (impl_->nextSlot != kDiagnosticsSlot) return false;
-    const bool sent = impl_->transmitDiagnostics(data);
-    if (sent) impl_->nextSlot = kDiagnosticsSlot + 1U;
-    return sent;
-  }
+  // Do not emit orphan U4B telemetry after a mid-cycle boot.
   return false;
+}
+
+bool MissionRadio::sequenceActive() const { return impl_->cycleActive; }
+
+bool MissionRadio::transmissionFaulted() const {
+  return impl_->transmissionFaulted;
 }
 
 }  // namespace wspr
